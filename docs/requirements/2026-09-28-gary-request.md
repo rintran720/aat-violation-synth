@@ -20,7 +20,7 @@ Source: chat message from Gary Ng to Paul (screenshot: [gary-request.png](gary-r
 
 ## Terms
 
-**Camera (concept):** one fixed viewpoint — a clean background image plus the frames showing objects from that same viewpoint, with its own calibration (scale, floor plane, lens). It is not tied to a physical device: any set of images sharing one viewpoint counts as one camera, and one physical camera that moves (e.g. PTZ presets) gives several cameras. `camera_id` names this viewpoint.
+**Camera (concept):** one fixed viewpoint — exactly one clean background image plus ~10 reference images showing the objects from that same viewpoint, with its own calibration (scale, floor plane, lens). It is not tied to a physical device: any set of images sharing one viewpoint counts as one camera, and one physical camera that moves (e.g. PTZ presets) gives several cameras. `camera_id` names this viewpoint.
 
 ## Decisions (2026-09-28)
 
@@ -28,14 +28,14 @@ Source: chat message from Gary Ng to Paul (screenshot: [gary-request.png](gary-r
 |---|---|
 | Violation type (POC) | **Forklift Pushing Multiple Lsps** (target model name): a forklift pushing cargo with more than one LSP at once is a violation; exactly one LSP is valid. Astra 6 scenario proposals are only variations of it (LSP count, arrangement, forklift heading and position, cargo type), listed in the scenario catalogue (2026-09-29 decisions below). Other violation types are out of scope |
 | Count rule | Valid: at most 1 LSP. Violation: 2 or more (`is_violation = lsp_count >= 2`); the real clip shows 2. Generation default: 2 LSPs in total (primary), 3 as a less frequent variant; the mix is configurable (`lsp_count_weights` in `config.json`) |
-| Input model (per camera) | For each camera: real frames showing the key objects (forklift, LSP, SKID, cargo) at different positions in the view, plus one clean background frame without those objects as the base of every output. SAM3 extracts every object from the object frames (crop, mask, 2D size and position) into a per-camera object library |
+| Input model (per camera) | Each camera has two separate inputs: (1) exactly **1 clean background image** with no forklift, LSP, SKID or cargo: the base of every output and the input to MoGe calibration; (2) **~10 reference images** from the same viewpoint showing the forklift, LSPs, SKIDs and cargo at different positions. The reference images are used only to extract objects: SAM3 crops, masks, 2D sizes and positions go into a per-camera object library (asset references, textures, size cross-check, lighting reference). They are never used as output backgrounds |
 | Calibration | Once per camera: MoGe on the clean background gives depth and geometry (camera, floor plane, metric scale), cross-checked with the size and position of the SAM3-detected objects (known real sizes, e.g. the LSP). Every image of that camera reuses this calibration |
 | Class name | The target model/class name is exactly `Forklift Pushing Multiple Lsps`, and the sidecar event box uses it. "Multiple LSPs" is only the existing detector's overlay text |
 | LSP size | The user will supply the exact size later. Until then it is measured (agent + MoGe); once supplied it is set as `lsp_size_m` in `config.json` and overrides the measurement |
 | Workstation | Pending: to be provided by stakeholders. Required: Ubuntu, an NVIDIA GPU, CUDA and SAM3 |
 | How 3D is built | Astra 6 (via Codex + CLI-Anything driving Blender) rebuilds the key objects as 3D assets from the SAM3 crops: forklift, LSP, SKID and the cargo types, prompted over several passes until the details show; real crops also serve as textures. Astra 6 also builds the proxy scene and generates the variations of each approved catalogue scenario |
 | Tooling | One workstation with Blender + Codex CLI (model GPT Astra 6), Blender controlled via [CLI-Anything](https://github.com/HKUDS/CLI-Anything). Codex sign-in with GPT Astra 6 available; usage bounded by the plan's limits (no API key, no budget to set) |
-| Rendering approach | **Approach B**: the camera's real clean background stays as background; the Blender scene is a proxy (placement, occlusion, shadows); render only the inserted objects (forklift + cargo + LSPs + idle SKIDs) + shadows and composite them onto the background, with photorealistic treatment matched to the object frames (lighting, colour, noise, blur, compression, shadows). Same camera angle and same image format as the source. |
+| Rendering approach | **Approach B**: the camera's real clean background stays as background; the Blender scene is a proxy (placement, occlusion, shadows); render only the inserted objects (forklift + cargo + LSPs + idle SKIDs) + shadows and composite them onto the background, with photorealistic treatment matched to the reference images (lighting, colour, noise, blur, compression, shadows). Same camera angle and same image format as the source. |
 | Why not full re-render | A fully rendered scene looks synthetic → domain gap; the model would learn "rendered = violation" and fail on RTSP |
 | Synthetic valid images | **Proposed addition (not in Gary's request):** Gary asked for violation images only. The forklift, cargo and LSPs are rendered only in synthetic images, while real valid images have none, so violation-only synthetic data would let the model learn the shortcut "rendered objects = violation". The same pipeline therefore also generates synthetic valid images (N1: forklift pushing exactly 1 LSP; N2: idle LSP row without a forklift; sidecar `is_violation: false`), so the model learns to count pushed LSPs instead of spotting rendered objects. Terry's A/B evaluation shows whether they are needed. The mix is configurable (`valid_fraction` in `config.json`) |
 | Priority | Generate violation images first; labeling is Terry's step, outside this ticket |
@@ -43,7 +43,7 @@ Source: chat message from Gary Ng to Paul (screenshot: [gary-request.png](gary-r
 | Target model | The "Forklift Pushing Multiple Lsps" model, trained by Terry on real images + our generated violation and valid images. Training is outside this ticket |
 | Success measure | This ticket: realistic images in the exact input format that pass human review (plan Task 15). Model gain on held-out real data (A/B vs. a real-only baseline, spec section 10) and the RTSP live test are Terry's checks, outside this ticket; if Terry reports no gain, we tune realism or the scenario mix and regenerate |
 | Scale path | Agent builds assets + scenario templates once per camera, saved as reproducible scripts; mass generation (~1000 images) runs from scripts with randomized params, no LLM per image |
-| POC scope | 1 camera: 1 clean background + a few object frames; violation "Forklift Pushing Multiple Lsps"; output ~10 violation images (V1, V2) + a few (3) synthetic valid images (N1, N2); every image also has 0–2 idle SKIDs |
+| POC scope | 1 camera: 1 clean background image (base of every output, MoGe input) + ~10 reference images (object extraction only); violation "Forklift Pushing Multiple Lsps"; output ~10 violation images (V1, V2) + a few (3) synthetic valid images (N1, N2); every image also has 0–2 idle SKIDs |
 
 ## Decisions (2026-09-29)
 
@@ -75,7 +75,7 @@ Clip: [violation-clip-forklift-pushing-2-lsps.mp4](violation-clip-forklift-pushi
 
 ## Pending inputs (to be provided by stakeholders)
 
-- Raw (no-overlay) footage from each target camera (POC: this camera): frames with forklifts, LSPs, SKIDs and cargo at several positions in the view (ideally including a forklift pushing exactly 1 LSP, fully visible idle LSPs and different cargo types), plus a clean background frame per camera without those objects. The camera must not move between them. Prerequisite for plan Task 3.
+- Raw (no-overlay) images from each target camera (POC: this camera), as two separate sets: (1) exactly 1 clean background image with no forklift, LSP, SKID or cargo; (2) ~10 reference images showing forklifts, LSPs, SKIDs and cargo at several positions in the view (ideally including a forklift pushing exactly 1 LSP, fully visible idle LSPs and different cargo types), used only for object extraction. The camera must not move between them. Prerequisite for plan Task 3.
 - The Ubuntu GPU workstation (does not exist yet). Required: Ubuntu, an NVIDIA GPU, CUDA and SAM3. Prerequisite for plan Task 1.
 - Codex sign-in on that workstation with GPT Astra 6 available (a signed-in plan, not an API key; usage bounded by the plan's limits, no budget to set). Plan Task 1 records which account it is (personal or team) and the plan's usage limits. Prerequisite for plan Task 1.
 - Exact LSP size (goes into `lsp_size_m` in `config.json`; measured until then).

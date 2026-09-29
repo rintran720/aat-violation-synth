@@ -29,7 +29,7 @@ Nguồn: tin nhắn của Gary Ng gửi Paul (ảnh chụp: [gary-request.png](g
 
 ## Thuật ngữ
 
-**Camera (khái niệm):** một góc nhìn cố định — một ảnh nền sạch cùng các frame có đối tượng chụp từ đúng góc nhìn đó, với hiệu chỉnh riêng (tỉ lệ, mặt phẳng sàn, ống kính). Khái niệm này không gắn với một thiết bị vật lý: bất kỳ tập ảnh nào chung một góc nhìn đều tính là một camera, và một camera vật lý di chuyển được (ví dụ các preset PTZ) cho ra nhiều camera. `camera_id` đặt tên cho góc nhìn này.
+**Camera (khái niệm):** một góc nhìn cố định — đúng một ảnh nền sạch cùng ~10 ảnh tham chiếu có các đối tượng chụp từ đúng góc nhìn đó, với hiệu chỉnh riêng (tỉ lệ, mặt phẳng sàn, ống kính). Khái niệm này không gắn với một thiết bị vật lý: bất kỳ tập ảnh nào chung một góc nhìn đều tính là một camera, và một camera vật lý di chuyển được (ví dụ các preset PTZ) cho ra nhiều camera. `camera_id` đặt tên cho góc nhìn này.
 
 ## Các quyết định (2026-09-28)
 
@@ -37,14 +37,14 @@ Nguồn: tin nhắn của Gary Ng gửi Paul (ảnh chụp: [gary-request.png](g
 |---|---|
 | Loại vi phạm (POC) | **Forklift Pushing Multiple Lsps** (tên model đích): xe nâng dùng nhiều hơn 1 tấm LSP cùng lúc để đẩy hàng là vi phạm; đúng 1 tấm LSP là hợp lệ. Astra 6 chỉ đề xuất các biến thể của loại này (số tấm LSP, cách xếp, hướng và vị trí xe nâng, loại hàng), được liệt kê trong danh mục kịch bản (các quyết định 2026-09-29 bên dưới). Các loại vi phạm khác nằm ngoài phạm vi |
 | Quy tắc số tấm | Hợp lệ: tối đa 1 tấm LSP. Vi phạm: từ 2 tấm trở lên (`is_violation = lsp_count >= 2`); clip thật có 2 tấm. Mặc định khi sinh ảnh: tổng cộng 2 tấm (chính), 3 tấm là biến thể ít gặp hơn; tỉ lệ cấu hình được (`lsp_count_weights` trong `config.json`) |
-| Mô hình đầu vào (theo camera) | Với mỗi camera: các frame thật có các đối tượng chính (forklift, LSP, SKID, cargo) ở nhiều vị trí khác nhau trong khung hình, cộng với một frame nền sạch không có các đối tượng đó làm nền cho mọi output. SAM3 tách từng đối tượng từ các frame đối tượng (ảnh cắt, mask, kích thước và vị trí 2D) vào thư viện đối tượng của camera |
+| Mô hình đầu vào (theo camera) | Mỗi camera có hai đầu vào riêng biệt: (1) đúng **1 ảnh nền sạch** không có xe nâng, LSP, SKID hay hàng: làm nền cho mọi output và là đầu vào cho bước hiệu chỉnh MoGe; (2) **~10 ảnh tham chiếu** chụp từ cùng góc nhìn, có xe nâng, LSP, SKID và hàng ở nhiều vị trí khác nhau. Ảnh tham chiếu chỉ dùng để tách đối tượng: ảnh cắt, mask, kích thước và vị trí 2D từ SAM3 được đưa vào thư viện đối tượng của camera (tham chiếu asset, texture, đối chiếu kích thước, tham chiếu ánh sáng). Chúng không bao giờ được dùng làm nền cho output |
 | Hiệu chỉnh | Một lần cho mỗi camera: MoGe chạy trên nền sạch cho depth và hình học (camera, mặt phẳng sàn, tỉ lệ mét), đối chiếu với kích thước và vị trí của các đối tượng SAM3 phát hiện (kích thước thật đã biết, ví dụ LSP). Mọi ảnh của camera đó dùng lại kết quả hiệu chỉnh này |
 | Tên class | Tên model/class đích chính xác là `Forklift Pushing Multiple Lsps`, và box sự kiện trong sidecar dùng tên này. "Multiple LSPs" chỉ là chữ overlay của detector có sẵn |
 | Kích thước LSP | Người dùng sẽ cung cấp kích thước chính xác sau. Trong lúc chờ, kích thước được đo (agent + MoGe); khi có, giá trị được đặt vào `lsp_size_m` trong `config.json` và ghi đè giá trị đo |
 | Máy trạm | Đang chờ: các bên liên quan sẽ cung cấp. Yêu cầu: Ubuntu, GPU NVIDIA, CUDA và SAM3 |
 | Cách dựng 3D | Astra 6 (qua Codex + CLI-Anything điều khiển Blender) dựng lại các đối tượng chính thành asset 3D từ ảnh cắt SAM3: forklift, LSP, SKID và các loại cargo, prompt qua nhiều lượt cho tới khi đủ chi tiết; ảnh cắt thật cũng được dùng làm texture. Astra 6 cũng dựng scene proxy và sinh biến thể cho từng kịch bản đã duyệt trong danh mục |
 | Công cụ | Một máy có Blender + Codex CLI (model GPT Astra 6), điều khiển Blender qua [CLI-Anything](https://github.com/HKUDS/CLI-Anything). Đăng nhập Codex với gói có sẵn GPT Astra 6; mức dùng bị giới hạn bởi hạn mức của gói (không dùng API key, không có ngân sách nào để đặt) |
-| Cách render | **Cách B**: giữ nền sạch thật của camera làm nền; scene Blender chỉ là proxy (định vị, che khuất, đổ bóng); chỉ render các đối tượng chèn vào (xe nâng + hàng + LSP + SKID nằm yên) + bóng rồi ghép lên nền, với xử lý photorealistic khớp theo các frame đối tượng (ánh sáng, màu, nhiễu, độ mờ, nén, bóng). Giữ nguyên góc camera và format ảnh gốc. |
+| Cách render | **Cách B**: giữ nền sạch thật của camera làm nền; scene Blender chỉ là proxy (định vị, che khuất, đổ bóng); chỉ render các đối tượng chèn vào (xe nâng + hàng + LSP + SKID nằm yên) + bóng rồi ghép lên nền, với xử lý photorealistic khớp theo các ảnh tham chiếu (ánh sáng, màu, nhiễu, độ mờ, nén, bóng). Giữ nguyên góc camera và format ảnh gốc. |
 | Vì sao không render toàn cảnh | Ảnh render toàn bộ trông "giả" → lệch domain; model học "ảnh render = vi phạm" và thất bại trên RTSP |
 | Ảnh hợp lệ tổng hợp | **Đề xuất bổ sung (không có trong yêu cầu của Gary):** Gary chỉ yêu cầu ảnh vi phạm. Xe nâng, hàng và LSP chỉ được render trong ảnh tổng hợp, còn ảnh hợp lệ thật không có chúng, nên nếu dữ liệu tổng hợp chỉ có ảnh vi phạm thì model có thể học lối tắt "vật thể render = vi phạm". Vì vậy cùng pipeline đó sinh thêm ảnh hợp lệ tổng hợp (N1: xe nâng đẩy đúng 1 tấm LSP; N2: hàng LSP nằm yên không có xe nâng; sidecar `is_violation: false`), để model học đếm số tấm LSP bị đẩy thay vì nhận ra vật thể render. Đánh giá A/B của Terry sẽ cho thấy có cần chúng hay không. Tỉ lệ cấu hình được (`valid_fraction` trong `config.json`) |
 | Ưu tiên | Tạo ảnh vi phạm trước; gán nhãn là bước của Terry, nằm ngoài ticket này |
@@ -52,7 +52,7 @@ Nguồn: tin nhắn của Gary Ng gửi Paul (ảnh chụp: [gary-request.png](g
 | Model đích | Model "Forklift Pushing Multiple Lsps", do Terry train bằng ảnh thật + ảnh vi phạm và ảnh hợp lệ do chúng tôi sinh ra. Việc train nằm ngoài ticket này |
 | Thước đo thành công | Ticket này: ảnh trông thật, đúng format đầu vào, đạt bước người duyệt (Task 15 của kế hoạch). Mức cải thiện của model trên dữ liệu thật giữ riêng (A/B so với baseline chỉ dùng dữ liệu thật, spec mục 10) và bài test RTSP trực tiếp là phần kiểm tra của Terry, nằm ngoài ticket này; nếu Terry báo không có cải thiện, chúng tôi tinh chỉnh độ thật hoặc tỉ lệ kịch bản rồi sinh lại ảnh |
 | Hướng mở rộng | Agent dựng asset + template kịch bản một lần cho mỗi camera, lưu thành script tái chạy được; sinh hàng loạt (~1000 ảnh) bằng script + tham số ngẫu nhiên, không gọi LLM cho từng ảnh |
-| Phạm vi POC | 1 camera: 1 nền sạch + vài frame đối tượng; vi phạm "Forklift Pushing Multiple Lsps"; output ~10 ảnh vi phạm (V1, V2) + vài (3) ảnh hợp lệ tổng hợp (N1, N2); mỗi ảnh còn có 0–2 SKID nằm yên |
+| Phạm vi POC | 1 camera: 1 ảnh nền sạch (nền cho mọi output, đầu vào MoGe) + ~10 ảnh tham chiếu (chỉ để tách đối tượng); vi phạm "Forklift Pushing Multiple Lsps"; output ~10 ảnh vi phạm (V1, V2) + vài (3) ảnh hợp lệ tổng hợp (N1, N2); mỗi ảnh còn có 0–2 SKID nằm yên |
 
 ## Các quyết định (2026-09-29)
 
@@ -84,7 +84,7 @@ Clip: [violation-clip-forklift-pushing-2-lsps.mp4](violation-clip-forklift-pushi
 
 ## Đầu vào đang chờ (các bên liên quan sẽ cung cấp)
 
-- Footage gốc (không overlay) của từng camera đích (POC: camera này): các frame có xe nâng, LSP, SKID và hàng ở nhiều vị trí trong khung hình (tốt nhất gồm cả xe nâng đẩy đúng 1 tấm LSP, các tấm LSP nằm yên thấy trọn vẹn và nhiều loại hàng), cộng với một frame nền sạch cho mỗi camera không có các đối tượng đó. Camera không được xê dịch giữa các frame. Là điều kiện tiên quyết cho Task 3 của kế hoạch.
+- Ảnh gốc (không overlay) của từng camera đích (POC: camera này), gồm hai tập riêng: (1) đúng 1 ảnh nền sạch không có xe nâng, LSP, SKID hay hàng; (2) ~10 ảnh tham chiếu có xe nâng, LSP, SKID và hàng ở nhiều vị trí trong khung hình (tốt nhất gồm cả xe nâng đẩy đúng 1 tấm LSP, các tấm LSP nằm yên thấy trọn vẹn và nhiều loại hàng), chỉ dùng để tách đối tượng. Camera không được xê dịch giữa các ảnh. Là điều kiện tiên quyết cho Task 3 của kế hoạch.
 - Máy trạm Ubuntu có GPU (hiện chưa có). Yêu cầu: Ubuntu, GPU NVIDIA, CUDA và SAM3. Là điều kiện tiên quyết cho Task 1 của kế hoạch.
 - Đăng nhập Codex trên máy trạm đó với gói có sẵn GPT Astra 6 (gói đã đăng nhập, không phải API key; mức dùng bị giới hạn bởi hạn mức của gói, không có ngân sách nào để đặt). Task 1 của kế hoạch ghi lại đó là tài khoản nào (cá nhân hay team) và hạn mức sử dụng của gói. Là điều kiện tiên quyết cho Task 1 của kế hoạch.
 - Kích thước LSP chính xác (đặt vào `lsp_size_m` trong `config.json`; trong lúc chờ thì dùng giá trị đo).

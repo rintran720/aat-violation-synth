@@ -2,11 +2,11 @@
 
 > Steps use checkbox (`- [ ]`) syntax for tracking. The project folder is not a git repository and this plan has no commit steps.
 
-**Goal:** For 1 camera, from 1 clean background frame (no forklift, LSP, SKID or cargo) plus a few raw frames of the same view with the key objects at different positions, produce ~10 synthetic "Forklift Pushing Multiple Lsps" violation images and a few synthetic valid images. The synthetic valid images are our proposed addition (not in Gary's request, which asks for violation images only): forklift, cargo and LSPs are rendered only in synthetic images, so they stop the model learning "rendered objects = violation" and make it count pushed LSPs instead. Each image inserts a forklift pushing cargo on a chain of LSPs: 2 LSPs in total by default, 3 less often (configurable) for violations, exactly 1 for valid images, some of which instead show a row of idle LSPs without a forklift. Every image also places 0–2 idle SKIDs (some with cargo on top) as scene distractors away from the forklift path. Every image is in the exact input format, is visually plausible, and has a JSON sidecar (`lsp_count`, `is_violation`, object boxes, event box for violations). This ticket only generates the images, sidecars and scripts and hands them to Terry, who labels, trains and tests (see "After the POC").
+**Goal:** For 1 camera, from two separate inputs, exactly 1 clean background image (no forklift, LSP, SKID or cargo; the base of every output and the input to MoGe-2 calibration) and ~10 reference images of the same view showing the forklift, LSPs, SKIDs and cargo at different positions (used only to extract objects, never as output backgrounds), produce ~10 synthetic "Forklift Pushing Multiple Lsps" violation images and a few synthetic valid images. The synthetic valid images are our proposed addition (not in Gary's request, which asks for violation images only): forklift, cargo and LSPs are rendered only in synthetic images, so they stop the model learning "rendered objects = violation" and make it count pushed LSPs instead. Each image inserts a forklift pushing cargo on a chain of LSPs: 2 LSPs in total by default, 3 less often (configurable) for violations, exactly 1 for valid images, some of which instead show a row of idle LSPs without a forklift. Every image also places 0–2 idle SKIDs (some with cargo on top) as scene distractors away from the forklift path. Every image is in the exact input format, is visually plausible, and has a JSON sidecar (`lsp_count`, `is_violation`, object boxes, event box for violations). This ticket only generates the images, sidecars and scripts and hands them to Terry, who labels, trains and tests (see "After the POC").
 
 **Camera (concept):** one fixed viewpoint — a clean background image plus the frames showing objects from that same viewpoint, with its own calibration (scale, floor plane, lens). It is not tied to a physical device: any set of images sharing one viewpoint counts as one camera, and one physical camera that moves (e.g. PTZ presets) gives several cameras. `camera_id` names this viewpoint.
 
-**Architecture:** Approach B. The camera's clean background stays as the background. SAM3 segments the key objects (forklift, LSP, SKID, cargo) in the object frames and builds a crop library (crops, masks, 2D size and position). MoGe-2 on the clean background plus a SAM3 floor mask calibrate a Blender camera and a metric floor frame, cross-checked with the measured size of real LSPs; this calibration is done once per camera. Codex (GPT Astra 6) uses `cli-anything-blender` to build an invisible proxy scene of the static geometry (shadow catchers and occluders) and lights, and rebuilds the forklift, the cargo types and the SKID as 3D assets from the crops, over several passes. Deterministic bpy puts real-crop textures on those assets and builds the LSP asset with textures rectified from real LSPs. A seeded randomizer places forklift + cargo + N LSPs (N = 1 or an idle LSP row for the proposed synthetic valid images, N >= 2 for violations), plus 0–2 idle SKIDs away from the forklift path, on the floor. Cycles renders only the inserted objects and their shadows, and Python composites them over the background with OSD protection, noise and blur matching, and a local H.264 round-trip. Spec: `docs/superpowers/specs/2026-09-28-violation-image-synth-design.md`.
+**Architecture:** Approach B. The camera's clean background stays as the background. SAM3 segments the key objects (forklift, LSP, SKID, cargo) in the ~10 reference images and builds a crop library (crops, masks, 2D size and position: asset references, textures, size cross-check, lighting reference). MoGe-2 on the clean background plus a SAM3 floor mask calibrate a Blender camera and a metric floor frame, cross-checked with the measured size of real LSPs; this calibration is done once per camera. Codex (GPT Astra 6) uses `cli-anything-blender` to build an invisible proxy scene of the static geometry (shadow catchers and occluders) and lights, and rebuilds the forklift, the cargo types and the SKID as 3D assets from the crops, over several passes. Deterministic bpy puts real-crop textures on those assets and builds the LSP asset with textures rectified from real LSPs. A seeded randomizer places forklift + cargo + N LSPs (N = 1 or an idle LSP row for the proposed synthetic valid images, N >= 2 for violations), plus 0–2 idle SKIDs away from the forklift path, on the floor. Cycles renders only the inserted objects and their shadows, and Python composites them over the background with OSD protection, noise and blur matching, and a local H.264 round-trip. Spec: `docs/superpowers/specs/2026-09-28-violation-image-synth-design.md`.
 
 **Tech Stack:** Ubuntu workstation with an NVIDIA GPU and CUDA. Python 3.12, numpy, Pillow, pytest, MoGe-2, SAM3 (required on the workstation), Blender ≥ 4.2 (Cycles), `cli-anything-blender` (CLI-Anything), Codex CLI (`codex exec`), ffmpeg.
 
@@ -216,6 +216,8 @@ Expected: S1 ≥ 4.2. S3 shows location `[-1.0, 2.0, 0.5]`; if not, change the `
 }
 ```
 
+`background_image` is the single clean background image. `object_frames_dir` is the reference images folder: it holds the ~10 reference images (`obj_*.png`) used only for object extraction; the key name stays as is.
+
 `n_images` 13 with `valid_fraction` 0.25 gives 10 violation images and 3 synthetic valid images (2 with a forklift pushing exactly 1 LSP, 1 idle LSP row without a forklift, set by `idle_row_fraction`). These valid images are our proposed addition, not in Gary's request; setting `valid_fraction` to 0 drops them if Terry's A/B evaluation shows they are not needed. `skid_count_weights` sets how many idle SKIDs (0, 1 or 2) each image gets.
 
 - [ ] **Step 2: Create `requirements.txt`**
@@ -271,7 +273,7 @@ You are helping synthesize CCTV safety-violation images with Blender. A clean ba
 ## Inputs of this camera (`camera_id` in `config.json`)
 
 - `data/input/cam01/background.png`: the clean background, base of every output.
-- `data/input/cam01/objects/obj_*.png`: real frames of the same fixed view with forklifts, LSPs, SKIDs and cargo at different positions: the reference for size, look, lighting and shadows.
+- `data/input/cam01/objects/obj_*.png`: ~10 reference images of the same fixed view with forklifts, LSPs, SKIDs and cargo at different positions, used only for object extraction (SAM3 crops and masks: asset references, textures, size cross-check, lighting and shadow reference). Never used as an output background.
 
 ## Coordinate conventions (must follow)
 
@@ -280,9 +282,9 @@ You are helping synthesize CCTV safety-violation images with Blender. A clean ba
 - `work/camera.json`: calibrated Blender camera (do not create or edit cameras; any camera you add is ignored).
 - `work/scene_facts.json`: camera height, pitch, FOV, floor fit quality, ambient colour.
 - `work/calibration.json`: per-camera cross-check with the real objects: measured LSP sizes, suggested scale correction, and the floor positions (x, y) where each object class was seen.
-- `work/points_world.npy`: shape (H//4, W//4, 3) float32, world XYZ of background pixel (u, v) is `P[v//4, u//4]`, NaN = invalid. The camera does not move, so it also gives the floor point under an object pixel of any object frame. Example:
+- `work/points_world.npy`: shape (H//4, W//4, 3) float32, world XYZ of background pixel (u, v) is `P[v//4, u//4]`, NaN = invalid. The camera does not move, so it also gives the floor point under an object pixel of any reference image. Example:
   `python -c "import numpy as np; P=np.load('work/points_world.npy'); print(P[400//4, 960//4])"`
-- `work/masks/background/<key>.png`: SAM3 masks of the clean background (floor, rack). `work/masks/obj_<n>/<key>.png` / `<key>_<i>.png`: union and single-instance masks of the object frames (forklift, LSP, SKID, cargo).
+- `work/masks/background/<key>.png`: SAM3 masks of the clean background (floor, rack). `work/masks/obj_<n>/<key>.png` / `<key>_<i>.png`: union and single-instance masks of the reference images (forklift, LSP, SKID, cargo).
 - `work/refs/<frame>_<key>_<rank>.png`: tight crops of real objects (pixels outside the mask filled with the object colour). `work/refs/index.json`: class, frame, 2D box, area and bottom-centre pixel of every crop.
 - `work/assets/<name>.blend`: metres, origin at the footprint centre on the floor, front / pushing direction = +Y. `lsp_<k>` are built by `blender/build_lsp.py` (same shape, different real textures); `forklift`, `cargo_<type>` and `skid` are built by you and textured by `blender/texture_asset.py`.
 
@@ -309,7 +311,7 @@ Expected: `work [[0, 0, 90, 24], [760, 0, 960, 26]]`
 
 ---
 
-### Task 3: Per-camera inputs: clean background and object frames
+### Task 3: Per-camera inputs: 1 clean background image and ~10 reference images
 
 **Files:**
 - Input: `data/raw/cam01.mp4` (raw, no overlays; prerequisite, **pending: to be provided by stakeholders**)
@@ -325,18 +327,18 @@ ls data/frames | wc -l
 
 Expected: `codec_name=h264|width=960|height=540|r_frame_rate=5/1` and one PNG per frame.
 
-- [ ] **Step 2: Pick the clean background and the object frames (human)**
+- [ ] **Step 2: Pick the clean background image and the reference images (human)**
 
-Browse `data/frames/` and pick:
-- **one clean background**: no forklift, LSP, SKID or cargo on the floor area where forklifts drive, normal lighting, no people in that area;
-- **5–10 object frames**: forklifts, LSPs, SKIDs and cargo at different positions in this view, ideally including a forklift pushing cargo on exactly 1 LSP, idle LSPs lying fully visible (they give the best textures and size measurements), and different cargo types.
+Browse `data/frames/` and pick two separate sets:
+- **exactly one clean background image**: the base of every output and the input to MoGe-2 calibration; no forklift, LSP, SKID or cargo on the floor area where forklifts drive, normal lighting, no people in that area;
+- **~10 reference images**: forklifts, LSPs, SKIDs and cargo at different positions in this view, used only to extract objects (SAM3 crops, masks and sizes for asset references, textures, the size cross-check and the lighting reference), never as output backgrounds; ideally including a forklift pushing cargo on exactly 1 LSP, idle LSPs lying fully visible (they give the best textures and size measurements), and different cargo types.
 
-All images of one camera must share the same viewpoint (the physical camera must not pan, tilt, zoom or shake between these frames): the calibration relies on object pixels of the object frames mapping onto the background's floor. Then run:
+All images of one camera must share the same viewpoint (the physical camera must not pan, tilt, zoom or shake between these frames): the calibration relies on object pixels of the reference images mapping onto the background's floor. Then run:
 
 ```bash
 mkdir -p data/input/cam01/objects
 cp data/frames/cam01_00042.png data/input/cam01/background.png   # clean: no forklift, LSP, SKID or cargo
-for n in 00120 00355 00610 00987 01240; do                       # key objects at different positions
+for n in 00120 00355 00610 00987 01240 01502 01777 02031 02315 02640; do   # ~10 reference images: key objects at different positions
   cp data/frames/cam01_$n.png data/input/cam01/objects/obj_$n.png
 done
 ```
@@ -473,7 +475,7 @@ if __name__ == "__main__":
         print(f"{len(frames)} object frames, {len(records)} object crops -> {cfg['work'] / 'refs'}")
 ```
 
-- [ ] **Step 4: Run the test, then segment the background and every object frame**
+- [ ] **Step 4: Run the test, then segment the background and every reference image**
 
 ```bash
 python -m pytest -q tests/test_segment.py
@@ -482,7 +484,7 @@ ls work/masks/background work/masks | head -20
 python -c "import json, collections; print(collections.Counter(r['class'] for r in json.load(open('work/refs/index.json'))))"
 ```
 
-Expected: `1 passed` for `python -m pytest -q tests/test_segment.py`. `work/masks/background/floor.png` covers most of the visible floor and none of the racks. Every class that is present in the object frames has crops in `work/refs/` and entries in `work/refs/index.json`. Open a few crops: each shows one whole object. If a prompt finds nothing, try another wording in `config.json` → `sam3_prompts` (for LSP: `"blue plastic sheet"`, `"floor mat"`), re-run, and record the working prompt in `docs/spike-notes.md`.
+Expected: `1 passed` for `python -m pytest -q tests/test_segment.py`. `work/masks/background/floor.png` covers most of the visible floor and none of the racks. Every class that is present in the reference images has crops in `work/refs/` and entries in `work/refs/index.json`. Open a few crops: each shows one whole object. If a prompt finds nothing, try another wording in `config.json` → `sam3_prompts` (for LSP: `"blue plastic sheet"`, `"floor mat"`), re-run, and record the working prompt in `docs/spike-notes.md`.
 
 ---
 
@@ -901,7 +903,7 @@ python -m pytest -q tests/test_lsp_texture.py
 python -m synth.lsp_texture
 ```
 
-Expected: `3 passed`, then at least 3 textures in `work/textures/`. Open them: each should show a blue, worn sheet that fills the square, with no floor or cargo at the borders. Delete any bad texture file and re-number the rest `lsp_0..lsp_k` in order. If the object frames give fewer than 3 good textures, also run `python -m synth.segment docs/requirements/lsp-reference.png LSP` and build again (another camera, so check the colour).
+Expected: `3 passed`, then at least 3 textures in `work/textures/`. Open them: each should show a blue, worn sheet that fills the square, with no floor or cargo at the borders. Delete any bad texture file and re-number the rest `lsp_0..lsp_k` in order. If the reference images give fewer than 3 good textures, also run `python -m synth.segment docs/requirements/lsp-reference.png LSP` and build again (another camera, so check the colour).
 
 ---
 
@@ -1913,7 +1915,7 @@ Expected: `SMOKE OK`. If the centroid check fails, the sign of `shift_x`/`shift_
 ````markdown
 # Task: build the proxy scene for this camera
 
-Read AGENTS.md first. The attached images are the clean background (`data/input/cam01/background.png`), the object frames of the same view (`data/input/cam01/objects/obj_*.png`), and possibly `work/debug/proxy_overlay.jpg` from a previous iteration.
+Read AGENTS.md first. The attached images are the clean background (`data/input/cam01/background.png`), the reference images of the same view (`data/input/cam01/objects/obj_*.png`, object extraction only, never a background), and possibly `work/debug/proxy_overlay.jpg` from a previous iteration.
 
 Goal: a PROXY scene of simple boxes/planes that sits exactly on top of the static geometry of the clean background (floor, racks, walls, columns), plus lights that reproduce the lighting of the real frames. Proxies are never visible in the final images: they only catch the shadows of the objects we insert (forklift, cargo, LSPs, SKIDs) and hide inserted objects that are behind real static things. Accuracy matters most on the open floor where forklifts are really seen (`object_floor_positions_m` in `work/calibration.json`) and within about 4 m of it.
 
@@ -1925,7 +1927,7 @@ Steps:
    - `proxy_floor`: a plane at z = 0 covering all visible floor where forklifts drive (at least 12 m x 12 m).
    - Racks, walls, columns and other static objects within 6 m of that floor: boxes named `proxy_<what>` (they must occlude inserted objects placed behind them).
    - No proxies for forklifts, LSPs, SKIDs or cargo: the background is clean and those objects are inserted later.
-4. Lights: study the real shadows of the forklifts, cargo and LSPs in the object frames (direction, softness, strength). Indoors with ceiling lights, use 1-3 `area` lights above the scene; with sunlight through doors/windows, use a `sun`. Name them `light_<what>`. Set power so an inserted grey object would be about as bright as similar real objects in the object frames.
+4. Lights: study the real shadows of the forklifts, cargo and LSPs in the reference images (direction, softness, strength). Indoors with ceiling lights, use 1-3 `area` lights above the scene; with sunlight through doors/windows, use a `sun`. Name them `light_<what>`. Set power so an inserted grey object would be about as bright as similar real objects in the object frames.
 5. Export to `work/proxy.blend` (see AGENTS.md), then render the alignment check:
    `blender --background --python blender/render_variants.py -- config.json --debug-proxy`
    `python -m synth.composite overlay work/debug/proxy.png work/debug/proxy_overlay.jpg`
@@ -1940,7 +1942,7 @@ Final message: a table of proxies (name, location, size), the lights with the re
 source .venv/bin/activate
 MODEL=$(python -c "import json; print(json.load(open('config.json'))['codex_model'])")
 SAFETY="-s workspace-write"   # or the flag recorded in docs/spike-notes.md (S8)
-OBJ=$(ls data/input/cam01/objects/obj_*.png | paste -sd, -)   # object frames of this camera
+OBJ=$(ls data/input/cam01/objects/obj_*.png | paste -sd, -)   # reference images of this camera
 mkdir -p work/logs work/cli
 codex exec - -m "$MODEL" $SAFETY --skip-git-repo-check -C "$PWD" -o work/logs/01_proxy.md \
   -i data/input/cam01/background.png,$OBJ < prompts/01_proxy_scene.md
@@ -1975,7 +1977,7 @@ Expected: `work/proxy.blend` exists and the overlay passes the gate. Write down 
 
 Read AGENTS.md first. Attached: `docs/requirements/lsp-reference.png` and SAM3 crops of real LSPs from this camera (`work/refs/*_LSP_*.png`).
 
-1. Size: `lsp_instances` in `work/calibration.json` holds the measured footprint (`extent_m`: long and short side) of every LSP seen in the object frames. Sheets partly covered by cargo or the forklift measure too short: rely on the fully visible ones, combine them with the reference image (LSPs are roughly square) and state your assumptions. You can re-measure a sheet with its mask `work/masks/obj_<n>/LSP_<i>.png` and `work/points_world.npy`.
+1. Size: `lsp_instances` in `work/calibration.json` holds the measured footprint (`extent_m`: long and short side) of every LSP seen in the reference images. Sheets partly covered by cargo or the forklift measure too short: rely on the fully visible ones, combine them with `docs/requirements/lsp-reference.png` (LSPs are roughly square) and state your assumptions. You can re-measure a sheet with its mask `work/masks/obj_<n>/LSP_<i>.png` and `work/points_world.npy`.
    If `lsp_size_m` in `config.json` is not null, that is the known real size: still measure (as a cross-check) and report both; the pipeline replaces your size with the configured one afterwards.
 2. Estimate thickness (expected 0.01-0.02 m), corner radius, and roughness (slightly glossy plastic: 0.3-0.5) from the crops.
 3. Write `work/lsp_params.json` exactly in this shape:
@@ -2021,7 +2023,7 @@ Expected: one `lsp_<k>.blend` per texture in `work/textures/`.
 ````markdown
 # Task: rebuild one real object as a 3D asset with cli-anything-blender
 
-Read AGENTS.md first. The first line of this prompt says `ASSET: <name>` (`forklift`, `cargo_<type>` or `skid`; SAM3 class `forklift`, `cargo` or `SKID`). The attached images are tight SAM3 crops of the real object from this camera's object frames (`work/refs/*_<class>_*.png`), and possibly preview renders of a previous attempt.
+Read AGENTS.md first. The first line of this prompt says `ASSET: <name>` (`forklift`, `cargo_<type>` or `skid`; SAM3 class `forklift`, `cargo` or `SKID`). The attached images are tight SAM3 crops of the real object from this camera's reference images (`work/refs/*_<class>_*.png`), and possibly preview renders of a previous attempt.
 
 Requirements:
 - Real-world size in metres. Measure it: the object's masks (`work/masks/obj_<n>/<class>_<i>.png`) with `work/points_world.npy` give its floor footprint; the height follows from the mask height and the camera geometry in `work/scene_facts.json`. State the measured dimensions and compare them with typical real sizes (a counterbalance forklift is about 2.5-3.5 m long without forks, 1.1-1.3 m wide, 2.1-2.3 m high at the overhead guard; a SKID is about 1.0-1.2 m x 0.8-1.2 m and 0.12-0.16 m high).
@@ -2082,16 +2084,16 @@ Expected: every asset passes the gate. The final look is judged again on the com
 ````markdown
 # Task: write the scenario template for "Forklift Pushing Multiple Lsps"
 
-Read AGENTS.md first. Attached: the clean background, the object frames of this camera and `work/debug/proxy_overlay.jpg`. Inputs: `work/calibration.json` (floor positions where forklifts and LSPs were really seen), `work/lsp_params.json` (LSP size), the assets in `work/assets/` (`forklift`, `cargo_<type>`, `lsp_<k>`, `skid`).
+Read AGENTS.md first. Attached: the clean background, the reference images of this camera and `work/debug/proxy_overlay.jpg`. Inputs: `work/calibration.json` (floor positions where forklifts and LSPs were really seen), `work/lsp_params.json` (LSP size), the assets in `work/assets/` (`forklift`, `cargo_<type>`, `lsp_<k>`, `skid`).
 
 Every generated image shows one forklift pushing cargo on a chain of N LSPs laid end to end ahead of its forks, along its heading. N = 1 is a synthetic VALID image, N >= 2 a violation; `valid_fraction` and `lsp_count_weights` in `config.json` set the mix (2 LSPs primary, 3 less often), so you do not set N. In the real violation clip the forklift pushes 2 LSPs in series under/ahead of the cargo; at this camera distance an LSP is only a thin strip of a few tens of pixels, partly hidden by the forklift and cargo. Every image also gets 0-2 idle SKIDs (`skid_count_weights` in `config.json`, so you do not set their number either), some with cargo on top: scene distractors, never part of the event.
 
 1. `floor_region`: an axis-aligned world rectangle [[x_min, y_min], [x_max, y_max]] of open, visible floor where this camera really sees forklifts drive (use `object_floor_positions_m`). The forklift origin and every LSP centre are kept inside it; it must not include racks, walls or other static proxies.
-2. `heading_deg`: [min, max] forklift heading in degrees about +Z (0 = +X, 90 = +Y), matching the real driving directions in the object frames (e.g. [80, 100] along a +Y aisle). One range covers one direction; if both directions are seen, pick the more frequent one for the POC.
+2. `heading_deg`: [min, max] forklift heading in degrees about +Z (0 = +X, 90 = +Y), matching the real driving directions in the reference images (e.g. [80, 100] along a +Y aisle). One range covers one direction; if both directions are seen, pick the more frequent one for the POC.
 3. `forks_to_lsp_m`: distance along the heading from the forklift origin to the centre of the first LSP (front of the forklift asset + half the LSP length + a small gap). The cargo stands on that first LSP, against the forks.
 4. `arrangements`: per-extra-LSP step in the forklift's local frame (metres, +Y = heading). `in_series` (primary): [0, size_y + gap, 0], gap 0.00-0.05. Add `offset_series` (e.g. [0.15, size_y + gap, 0]) and `stacked` ([0, 0, thickness]) only if they are plausible here.
 5. Idle SKIDs: `skid_height_m` is the height of the `skid` asset (cargo on an idle SKID stands at that height; see `work/logs/05_skid.md`). `skid_clearance_m` is the minimum sideways distance of a SKID from the forklift's lane (the line through the forklift and its LSP chain) and from the other SKIDs: at least half the forklift width + half the SKID diagonal + 0.3 m (about 2.0). SKIDs are kept inside `floor_region`, so it must leave room for them beside the lane.
-   `idle_row_lsps`: [min, max] number of idle LSPs in a row for the valid scene without a forklift (`idle_row_fraction` in `config.json` sets how often); the row uses the `in_series` step and must fit inside `floor_region` (the reference image shows 5).
+   `idle_row_lsps`: [min, max] number of idle LSPs in a row for the valid scene without a forklift (`idle_row_fraction` in `config.json` sets how often); the row uses the `in_series` step and must fit inside `floor_region` (`docs/requirements/lsp-reference.png` shows 5).
 6. Write `work/scenario.json` exactly in this shape (list every asset that exists in `work/assets/`):
    {"violation_id": "forklift_pushing_multiple_lsps",
     "assets": {"forklift": ["forklift"], "cargo": ["cargo_0"], "lsp": ["lsp_0", "lsp_1"], "skid": ["skid"]},
@@ -2107,7 +2109,7 @@ Every generated image shows one forklift pushing cargo on a chain of N LSPs laid
    `python -m synth.randomize 3`
    `blender --background --python blender/render_variants.py -- config.json`
    `python -m synth.composite all`
-   If you can view local images, open `work/out/v_000.png` .. `v_002.png` next to the object frames: forklift, cargo and LSPs must stand/lie on the floor at the same scale as the real ones, the LSPs must be in series ahead of the forks, idle SKIDs must lie on the floor clear of the forklift's path, nothing may intersect static objects, and inserted objects must be hidden where racks are in front of them. Adjust `scenario.json` and repeat at most 5 times.
+   If you can view local images, open `work/out/v_000.png` .. `v_002.png` next to the reference images: forklift, cargo and LSPs must stand/lie on the floor at the same scale as the real ones, the LSPs must be in series ahead of the forks, idle SKIDs must lie on the floor clear of the forklift's path, nothing may intersect static objects, and inserted objects must be hidden where racks are in front of them. Adjust `scenario.json` and repeat at most 5 times.
 
 Final message: the final scenario.json and one sentence per value explaining why it fits this camera.
 ````
@@ -2120,7 +2122,7 @@ codex exec - -m "$MODEL" $SAFETY --skip-git-repo-check -C "$PWD" -o work/logs/04
 python -c "import json; s = json.load(open('work/scenario.json')); print(s['floor_region'], s['heading_deg'], s['arrangements'])"
 ```
 
-- [ ] **Step 3: Human gate on the 3 check images.** Look at `work/out/v_000.png`..`v_002.png` at 100 % and 200 % zoom next to the object frames. The forklift must stand on the floor with its forks towards the cargo, the LSPs must lie flat and in series ahead of the forks at the same scale as real LSPs, idle SKIDs must lie on the floor clear of the forklift's path, objects must be hidden where racks are in front of them, and nothing may be over the OSD. If it fails, re-run Step 2 with `-i data/input/cam01/background.png,$OBJ,work/out/v_000.png,work/out/v_001.png` (at most 3 times); if the forklift or cargo itself looks wrong, go back to Task 13 Step 3.
+- [ ] **Step 3: Human gate on the 3 check images.** Look at `work/out/v_000.png`..`v_002.png` at 100 % and 200 % zoom next to the reference images. The forklift must stand on the floor with its forks towards the cargo, the LSPs must lie flat and in series ahead of the forks at the same scale as real LSPs, idle SKIDs must lie on the floor clear of the forklift's path, objects must be hidden where racks are in front of them, and nothing may be over the OSD. If it fails, re-run Step 2 with `-i data/input/cam01/background.png,$OBJ,work/out/v_000.png,work/out/v_001.png` (at most 3 times); if the forklift or cargo itself looks wrong, go back to Task 13 Step 3.
 
 ---
 
@@ -2156,14 +2158,14 @@ Expected: `22 passed`, `OK: 13 images match the input format`, and `contact shee
 cp work/variants.json work/variants.first.json && python -m synth.randomize && cmp work/variants.json work/variants.first.json && echo REPRODUCIBLE
 ```
 
-- [ ] **Step 4: Human review.** Open `work/contact_sheet.jpg` (red = forklift, cargo and LSP boxes, cyan = idle SKIDs and their cargo, yellow = event box of violation images), then each `work/out/v_*.png` at 100 % and 200 % beside the background and the object frames. Fill in `work/review.md`:
+- [ ] **Step 4: Human review.** Open `work/contact_sheet.jpg` (red = forklift, cargo and LSP boxes, cyan = idle SKIDs and their cargo, yellow = event box of violation images), then each `work/out/v_*.png` at 100 % and 200 % beside the background and the reference images. Fill in `work/review.md`:
 
 ```markdown
 # Review — Forklift Pushing Multiple Lsps POC
 
 Reviewer:            Date:
 
-| Image | Valid / violation | Scale OK | On floor / no float | Occlusion OK | Forklift & cargo look real | Colour, light & shadows match object frames | Edges/noise/compression match | OSD intact | Idle SKIDs on floor, off path | LSP count readable | Pass |
+| Image | Valid / violation | Scale OK | On floor / no float | Occlusion OK | Forklift & cargo look real | Colour, light & shadows match reference images | Edges/noise/compression match | OSD intact | Idle SKIDs on floor, off path | LSP count readable | Pass |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | v_000 | | | | | | | | | | | |
 | v_001 | | | | | | | | | | | |
@@ -2190,7 +2192,7 @@ Notes:
 | Inserted objects too sharp / too soft | `composite.blur_sigma` |
 | Too clean / too noisy | `composite.noise_sigma` (null = auto) |
 | Too clean / too blocky vs. surroundings | `composite.h264_crf` (higher = more artifacts) |
-| Colour cast or brightness off vs. the object frames | `composite.gain`, `blender.world_strength`, light power in `work/cli/proxy.blend-cli.json` (then re-export per AGENTS.md) |
+| Colour cast or brightness off vs. the reference images | `composite.gain`, `blender.world_strength`, light power in `work/cli/proxy.blend-cli.json` (then re-export per AGENTS.md) |
 | Forklift, cargo or SKID looks synthetic / wrong shape | Task 13 Step 3 (another Astra 6 pass with previews), or another crop for `texture_asset.py` |
 | LSP size off vs. real LSP | `lsp_size_m` in `config.json` once the real size is known (re-run Task 12 Steps 2–3), else `work/lsp_params.json` sizes (rebuild assets) or `scale_correction` (redo from Task 5) |
 | Share of valid vs. violation images | `valid_fraction` in `config.json` |
@@ -2223,9 +2225,9 @@ POC realism acceptance is ours and closes this ticket's POC. It is necessary but
 
 Read AGENTS.md first. The first line of this prompt says `SCENARIO: <id>`, a row of the scenario catalogue in `docs/superpowers/specs/2026-09-28-violation-image-synth-design.md` (section 1.1, "Scenario catalogue: Forklift Pushing Multiple Lsps"): `V1`-`V8` are violation scenarios (the forklift pushes 2 or more LSPs), `N1`-`N5` are look-alike valid scenes (hard negatives). Do not invent scenarios or other violation types: generate VARIATIONS of that scenario only. The POC runs `V1`, `V2`, `N1` and `N2`. Some rules are still to be confirmed with Terry: whether `V3` (stacked) and `V6` (empty extra LSP) are violations, and where the boundary is when a forklift touches an idle LSP (`N3`/`N4`). For those scenarios, if the decision does not follow the `SCENARIO` line, stop and say which rule is missing.
 
-The attached images are the clean background, the object frames of this camera, `docs/requirements/lsp-reference.png` (5 idle LSPs: NOT a violation, the look of `N2`) and `docs/requirements/violation-clip-frames/zoom-t05-t06-t08.jpg` (a real `V1`: the forklift pushes 2 LSPs in series; the coloured overlays come from an existing detector and are not part of the scene).
+The attached images are the clean background, the reference images of this camera, `docs/requirements/lsp-reference.png` (5 idle LSPs: NOT a violation, the look of `N2`) and `docs/requirements/violation-clip-frames/zoom-t05-t06-t08.jpg` (a real `V1`: the forklift pushes 2 LSPs in series; the coloured overlays come from an existing detector and are not part of the scene).
 
-Propose 4-8 physically plausible VARIATIONS of the scenario for this camera, along these axes: forklift heading and position in the view, LSP gap and offset, cargo type and height (from the cargo seen in the object frames), SKID distractors, lighting. Reject variations that are physically impossible for this forklift and camera view, or where the LSPs that decide valid vs. violation would be fully hidden.
+Propose 4-8 physically plausible VARIATIONS of the scenario for this camera, along these axes: forklift heading and position in the view, LSP gap and offset, cargo type and height (from the cargo seen in the reference images), SKID distractors, lighting. Reject variations that are physically impossible for this forklift and camera view, or where the LSPs that decide valid vs. violation would be fully hidden.
 
 Write `work/variations/<id>.json`: a JSON list of objects with keys `scenario`, `id`, `title`, `is_violation`, `lsp_total`, `arrangement`, `step_local_m` ([dx, dy, dz] offset per extra LSP in the forklift's local frame, +Y = heading), `heading_deg` ([min, max]), `cargo_type`, `skid_distractors`, `lighting`, `visibility` (how much of the LSPs the camera would see), `plausibility_notes`. Use null for keys that do not apply.
 
@@ -2263,7 +2265,7 @@ Terry labels the images, converts them to the label format he needs, trains the 
 
 | Spec item | Task |
 |---|---|
-| Raw footage prerequisite, ffmpeg frame extraction, clean background + object frames per camera | 3 |
+| Raw footage prerequisite, ffmpeg frame extraction, 1 clean background image + ~10 reference images per camera | 3 |
 | CLI-Anything / Codex unverified facts → spike | 1 |
 | SAM3 masks, object crop library (crops, masks, 2D box, position) | 4 |
 | Per-camera calibration: MoGe-2 on the clean background, floor plane, metric scale cross-checked with real LSP sizes, reused by all images of the camera | 2, 5 |
