@@ -151,7 +151,7 @@ def run(cfg):
         xy = world_full[np.asarray(Image.open(mpath).convert("L")) > 127][:, :2]
         xy = xy[np.isfinite(xy).all(axis=1)]
         if len(xy) >= 50:
-            lsps.append({"mask": str(mpath), "extent_m": footprint_extent(xy), "centre_m": xy.mean(axis=0).round(2).tolist()})
+            lsps.append({"mask": mpath.as_posix(), "extent_m": footprint_extent(xy), "centre_m": xy.mean(axis=0).round(2).tolist()})
     # LSP size from SAM3 key LSP_top (flat tops: single sheets and stack tops): measured in 3D from MoGe on their own
     # reference image (the sheet is not on the background), then converted to background units via the camera height
     tops = []
@@ -182,7 +182,7 @@ def run(cfg):
             flat = pts_top[np.abs(pts_top[:, 2] - z) < 0.05]  # the top plane only, not the stack's sides
             extent = footprint_extent(flat[:, :2])
             cells = np.unique(np.floor(flat[:, :2] / 0.1), axis=0)  # 10 cm grid: a sheet partly covered by cargo has holes
-            tops.append({"mask": str(mpath), "extent_m": extent, "height_m": round(z, 3),
+            tops.append({"mask": mpath.as_posix(), "extent_m": extent, "height_m": round(z, 3),
                          "centre_m": flat[:, :2].mean(axis=0).round(2).tolist(), "flat_fraction": round(len(flat) / len(pts_top), 2),
                          "fill": round(min(1.0, len(cells) * 0.01 / (extent[0] * extent[1])), 2)})
         print(f"{f.stem}: {len(top_masks)} LSP top sheets, floor fit camera height {d_f:.2f} (background {d:.2f})")

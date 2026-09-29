@@ -42,7 +42,7 @@ def run(cfg, processor, image_path, keys):
     work, stem = cfg["work"], Path(image_path).stem
     mdir = work / "masks" / stem
     (work / "refs").mkdir(parents=True, exist_ok=True)
-    write_json(mdir / "source.json", {"image": str(image_path)})
+    write_json(mdir / "source.json", {"image": Path(image_path).as_posix()})
     image = Image.open(image_path).convert("RGB")
     pixels = np.asarray(image)
     state = processor.set_image(image)
@@ -82,7 +82,7 @@ def run(cfg, processor, image_path, keys):
             crop, info = object_record(pixels, masks[idx])
             name = f"{stem}_{key}_{rank}.png"
             Image.fromarray(crop).save(work / "refs" / name)
-            records.append({"class": key, "frame": str(image_path), "rank": rank, "score": round(scores[idx], 3),
+            records.append({"class": key, "frame": Path(image_path).as_posix(), "rank": rank, "score": round(scores[idx], 3),
                             "crop": f"work/refs/{name}", **info})
     return records
 
