@@ -1,0 +1,32 @@
+{
+  "camera_id": "cam01",
+  "background_image": "data/cam01/background.jpg",
+  "object_frames_dir": "data/cam01/references",
+  "work_dir": "work",
+  "codex_model": "gpt-astra-6",
+  "moge_model": "Ruicheng/moge-2-vitl-normal",
+  "scale_correction": 1.0,
+  "lsp_size_m": null,
+  "osd_boxes": [[0, 0, 90, 24], [760, 0, 960, 26]],
+  "sam3_prompts": {
+    "floor": "floor",
+    "forklift": "forklift",
+    "LSP": ["black platform", "stacked pallets"],
+    "SKID": "wooden pallet",
+    "cargo": ["stretch wrapped cargo", "box"],
+    "rack": "storage rack",
+    "LSP_top": "flat top of platform"
+  },
+  "sam3_thresholds": {"SKID": 0.3},
+  "sam3_filters": {
+    "SKID": {"hue_deg": [30, 65], "sat": [0.08, 0.5], "val_min": 0.35, "min_colour_fraction": 0.3, "max_overlap": {"LSP": 0.5}}
+  },
+  "n_images": 13,
+  "valid_fraction": 0.25,
+  "lsp_count_weights": {"2": 3, "3": 1},
+  "skid_count_weights": {"0": 1, "1": 2, "2": 1},
+  "idle_row_fraction": 0.33,
+  "seed": 7,
+  "blender": {"samples": 128, "world_strength": 1.0},
+  "composite": {"blur_sigma": 0.8, "noise_sigma": null, "gain": [1.0, 1.0, 1.0], "h264_crf": 28}
+}

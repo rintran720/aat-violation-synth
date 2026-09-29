@@ -1,0 +1,3 @@
+# SAM3 declares numpy<2 but MoGe needs numpy>=2. SAM3's only numpy-1 API use (np.bool) is in its agent
+# visualizer, which synth/segment.py does not load, so both run on numpy 2.
+numpy>=2

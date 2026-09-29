@@ -1,0 +1,7 @@
+numpy
+pillow
+huggingface_hub
+# SAM3 imports these but does not declare them
+einops
+pycocotools
+psutil

@@ -333,6 +333,16 @@ Browse `data/frames/` and pick two separate sets:
 - **exactly one clean background image**: the base of every output and the input to MoGe-2 calibration; no forklift, LSP, SKID or cargo on the floor area where forklifts drive, normal lighting, no people in that area;
 - **~10 reference images**: forklifts, LSPs, SKIDs and cargo at different positions in this view, used only to extract objects (SAM3 crops, masks and sizes for asset references, textures, the size cross-check and the lighting reference), never as output backgrounds; ideally including a forklift pushing cargo on exactly 1 LSP, idle LSPs lying fully visible (they give the best textures and size measurements), and different cargo types.
 
+The reference images must be **diverse**: every image has to add something the others do not show. Take them from different times (different hours or days), not from consecutive frames, and cover:
+- the forklift in several headings (towards the camera, away, sideways left and right, diagonal), both near and far in the view;
+- a forklift pushing cargo on exactly 1 LSP (and on 2 LSPs if such footage exists);
+- single LSPs lying flat and fully visible, at several positions (textures, wear, size measurement);
+- SKIDs seen clearly, e.g. an empty wooden pallet or one with its side visible, not only the thin strip under cargo;
+- the different cargo types (cartons, stretch-wrapped loads, low and tall);
+- lighting changes such as day and night shifts, if the scene changes with them.
+
+Do not add near-duplicate images (consecutive frames, or the same objects at the same place and pose): they add no new views of the objects, only more of the same crops, so they bring no value. Low diversity of the reference images means the objects are not seen from enough sides, which limits the SAM3 crop library and the 3D assets rebuilt from it (first run on cam01, 2026-09-29: 12 nearly identical reference images).
+
 All images of one camera must share the same viewpoint (the physical camera must not pan, tilt, zoom or shake between these frames): the calibration relies on object pixels of the reference images mapping onto the background's floor. Then run:
 
 ```bash

@@ -333,6 +333,16 @@ Duyệt `data/frames/` và chọn hai tập riêng:
 - **đúng một ảnh nền sạch**: nền cho mọi output và đầu vào cho bước hiệu chỉnh MoGe-2; không có xe nâng, LSP, SKID hay hàng trên vùng sàn nơi xe nâng chạy, ánh sáng bình thường, không có người trong vùng đó;
 - **~10 ảnh tham chiếu**: xe nâng, LSP, SKID và hàng ở các vị trí khác nhau trong góc nhìn này, chỉ dùng để tách đối tượng (ảnh cắt, mask và kích thước từ SAM3 cho tham chiếu asset, texture, đối chiếu kích thước và tham chiếu ánh sáng), không bao giờ dùng làm nền cho output; tốt nhất gồm cả một xe nâng đẩy hàng trên đúng 1 tấm LSP, các tấm LSP nằm yên và thấy trọn vẹn (cho texture và số đo kích thước tốt nhất), và nhiều loại hàng khác nhau.
 
+Các ảnh tham chiếu phải **đa dạng**: mỗi ảnh phải cho thấy điều mà các ảnh khác chưa có. Lấy ảnh ở các thời điểm khác nhau (khác giờ hoặc khác ngày), không lấy các frame liên tiếp, và bao quát:
+- xe nâng theo nhiều hướng (đi về phía camera, đi ra xa, ngang trái và phải, chéo), cả ở gần và ở xa trong khung hình;
+- xe nâng đẩy hàng trên đúng 1 tấm LSP (và trên 2 tấm nếu có cảnh quay như vậy);
+- các tấm LSP đơn nằm phẳng, thấy trọn vẹn, ở nhiều vị trí (texture, độ mòn, đo kích thước);
+- SKID nhìn rõ, ví dụ pallet gỗ trống hoặc thấy được cạnh bên, không chỉ là dải mỏng dưới hàng;
+- các loại hàng khác nhau (thùng carton, kiện bọc màng co, thấp và cao);
+- thay đổi ánh sáng như ca ngày và ca đêm, nếu cảnh thay đổi theo.
+
+Không đưa vào các ảnh gần trùng nhau (frame liên tiếp, hoặc cùng đối tượng ở cùng vị trí và tư thế): chúng không cho thêm góc nhìn mới của đối tượng mà chỉ thêm các ảnh cắt giống nhau, nên không tạo ra giá trị. Ảnh tham chiếu kém đa dạng khiến đối tượng không được nhìn thấy đủ các phía, làm hạn chế thư viện ảnh cắt SAM3 và các asset 3D dựng lại từ đó (lần chạy đầu trên cam01, 2026-09-29: 12 ảnh tham chiếu gần như giống hệt nhau).
+
 Mọi ảnh của một camera phải có cùng một góc nhìn (camera vật lý không được xoay, nghiêng, zoom hay rung giữa các frame này): việc hiệu chỉnh dựa trên việc pixel đối tượng trong ảnh tham chiếu khớp với sàn của nền. Sau đó chạy:
 
 ```bash

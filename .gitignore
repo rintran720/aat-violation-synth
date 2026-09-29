@@ -1,0 +1,5 @@
+.venv/
+vendor/
+work/
+data/
+__pycache__/
