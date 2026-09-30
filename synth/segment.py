@@ -32,10 +32,12 @@ def object_record(image, mask):
 
 
 def load_processor():
+    import torch
     from sam3.model.sam3_image_processor import Sam3Processor
     from sam3.model_builder import build_sam3_image_model
 
-    return Sam3Processor(build_sam3_image_model())
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return Sam3Processor(build_sam3_image_model(device=device), device=device)
 
 
 def run(cfg, processor, image_path, keys):
@@ -90,7 +92,8 @@ def run(cfg, processor, image_path, keys):
 if __name__ == "__main__":
     import torch
 
-    torch.autocast("cuda", dtype=torch.bfloat16).__enter__()  # SAM3 runs in bf16 autocast (as in its examples)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.autocast(device, dtype=torch.bfloat16).__enter__()  # SAM3 checkpoints and inference use bfloat16
     cfg = load_config()
     processor = load_processor()
     if len(sys.argv) > 1:
