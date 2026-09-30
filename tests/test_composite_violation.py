@@ -1,5 +1,6 @@
 import numpy as np
 from synth.composite_violation import composite
+from synth.composite_anchor_poc import restore_foreground
 
 
 def test_composite_preserves_protected_and_outside_pixels():
@@ -9,6 +10,15 @@ def test_composite_preserves_protected_and_outside_pixels():
     assert np.array_equal(result[:8],bg[:8])
     assert np.array_equal(result[~support],bg[~support])
     assert result[10,15,0]>240 and result[10,15,1]<10
+
+
+def test_foreground_mask_restores_source_pixels_only_inside_mask():
+    background=np.full((8,9,3),120,dtype='uint8')
+    rendered=np.full_like(background,240)
+    mask=np.zeros((8,9),dtype=bool);mask[2:6,3:7]=True
+    result=restore_foreground(rendered,background,mask)
+    assert np.array_equal(result[mask],background[mask])
+    assert np.array_equal(result[~mask],rendered[~mask])
 
 
 def test_transparent_rgb_does_not_create_black_halos():

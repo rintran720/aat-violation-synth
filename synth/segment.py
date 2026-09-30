@@ -93,7 +93,10 @@ if __name__ == "__main__":
     import torch
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    torch.autocast(device, dtype=torch.bfloat16).__enter__()  # SAM3 checkpoints and inference use bfloat16
+    # The checkpoint uses bfloat16 on CUDA, but CPU autocast can produce mixed
+    # inputs and weights in SAM3's image encoder. Keep CPU inference in float32.
+    if device == "cuda":
+        torch.autocast(device, dtype=torch.bfloat16).__enter__()
     cfg = load_config()
     processor = load_processor()
     if len(sys.argv) > 1:
