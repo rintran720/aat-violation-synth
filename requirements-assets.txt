@@ -1,0 +1,6 @@
+# CPU-only asset-authoring environment; independent of the SAM3/CUDA environment.
+numpy>=2
+pillow>=10
+pytest>=8
+# Install the local harness separately:
+# uv pip install --python .venv/bin/python ./tools/CLI-Anything/blender/agent-harness
