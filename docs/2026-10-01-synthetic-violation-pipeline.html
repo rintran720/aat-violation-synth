@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AAT Violation Pipeline</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #5b6577; --line: #dde2ea;
+    --a: #2f6fdb; --a-soft: #e6eefc; --b: #0f8a6a; --b-soft: #e1f4ee; --c: #b8641b; --c-soft: #fbeedf;
+    --ok: #1d7a44; --ok-bg: #e2f4e9; --part: #8a6400; --part-bg: #fbf1d4; --todo: #a33a3a; --todo-bg: #f9e3e3;
+    --code: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12161c; --panel: #1b2029; --ink: #e6e9ee; --muted: #9aa4b4; --line: #2c3340;
+      --a: #7ea8f2; --a-soft: #1d2a42; --b: #5cc8a8; --b-soft: #16302a; --c: #e5a468; --c-soft: #33261a;
+      --ok: #7fd4a0; --ok-bg: #173424; --part: #e8c66a; --part-bg: #352c14; --todo: #ef9a9a; --todo-bg: #3a1d1d;
+      --code: #232a35;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12161c; --panel: #1b2029; --ink: #e6e9ee; --muted: #9aa4b4; --line: #2c3340;
+    --a: #7ea8f2; --a-soft: #1d2a42; --b: #5cc8a8; --b-soft: #16302a; --c: #e5a468; --c-soft: #33261a;
+    --ok: #7fd4a0; --ok-bg: #173424; --part: #e8c66a; --part-bg: #352c14; --todo: #ef9a9a; --todo-bg: #3a1d1d;
+    --code: #232a35;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 6px; }
+  h2 { font-size: 20px; margin: 40px 0 12px; }
+  h3 { font-size: 16px; margin: 0 0 6px; }
+  p { margin: 6px 0; }
+  .lead { color: var(--muted); max-width: 760px; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  /* overview flow */
+  .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1.4fr; gap: 10px; align-items: stretch; margin-top: 18px; }
+  .stage { border-radius: 10px; padding: 14px; border: 1px solid var(--line); background: var(--panel); }
+  .stage .tag { font-weight: 700; font-size: 13px; letter-spacing: .04em; text-transform: uppercase; }
+  .stage.a { border-top: 4px solid var(--a); } .stage.a .tag { color: var(--a); }
+  .stage.b { border-top: 4px solid var(--b); } .stage.b .tag { color: var(--b); }
+  .stage.c { border-top: 4px solid var(--c); } .stage.c .tag { color: var(--c); }
+  .stage .freq { color: var(--muted); font-size: 13px; }
+  .arrow { align-self: center; color: var(--muted); font-size: 22px; }
+  .steps-inline { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .steps-inline span { background: var(--c-soft); color: var(--ink); border-radius: 6px; padding: 2px 8px; font-size: 13px; }
+  /* step cards */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .card.a { border-left: 4px solid var(--a); } .card.b { border-left: 4px solid var(--b); } .card.c { border-left: 4px solid var(--c); }
+  .card dl { margin: 8px 0 0; display: grid; grid-template-columns: 78px 1fr; gap: 4px 8px; font-size: 13.5px; }
+  .card dt { color: var(--muted); }
+  .card dd { margin: 0; }
+  .badge { display: inline-block; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 1px 9px; margin-left: 6px; vertical-align: 1px; }
+  .ok { color: var(--ok); background: var(--ok-bg); }
+  .part { color: var(--part); background: var(--part-bg); }
+  .todo { color: var(--todo); background: var(--todo-bg); }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin: 8px 0 14px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--code); font-weight: 600; }
+  tr:last-child td { border-bottom: 0; }
+  .table-wrap { overflow-x: auto; }
+  ol.next li { margin: 4px 0; }
+  .note { border-left: 3px solid var(--part); background: var(--part-bg); padding: 10px 12px; border-radius: 6px; margin: 12px 0; }
+  footer { margin-top: 40px; color: var(--muted); font-size: 13px; }
+  @media (max-width: 760px) {
+    .flow { grid-template-columns: 1fr; }
+    .arrow { transform: rotate(90deg); justify-self: center; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Pipeline sinh ảnh vi phạm tổng hợp (AAT)</h1>
+  <p class="lead">Chèn LSP và cargo dựng 3D vào khung hình camera thật có sẵn xe nâng, theo kịch bản
+    <em>Forklift Pushing Multiple LSPs</em>. Pipeline chia ba giai đoạn theo tần suất chạy:
+    A làm một lần, dùng chung mọi camera; B làm một lần cho mỗi camera; C chạy tự động mỗi lần sinh ảnh.</p>
+
+  <div class="flow" role="img" aria-label="Ba giai đoạn A, B, C nối tiếp nhau">
+    <div class="stage a">
+      <div class="tag">A · Dữ liệu &amp; asset</div>
+      <div class="freq">Một lần, dùng chung</div>
+      <p>Vật mẫu, asset render, mô hình khớp xe, bảng số liệu chuẩn, danh mục kịch bản.</p>
+    </div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="stage b">
+      <div class="tag">B · Bối cảnh camera</div>
+      <div class="freq">Một lần mỗi camera</div>
+      <p>Hiệu chỉnh camera và sàn, kiểm tra bằng vật chuẩn, vùng đặt hàng, ánh sáng và màu.</p>
+    </div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="stage c">
+      <div class="tag">C · Pipeline</div>
+      <div class="freq">Tự động, mỗi lần sinh ảnh</div>
+      <div class="steps-inline">
+        <span>1 RTSP &amp; lọc khung</span><span>2 Vị trí &amp; hướng xe</span><span>3 Đặt LSP &amp; cargo</span>
+        <span>4 Che khuất</span><span>5 Ghép &amp; xuất</span><span>6 Duyệt chất lượng</span>
+      </div>
+    </div>
+  </div>
+
+  <h2>Trạng thái từng bước</h2>
+  <div class="legend">
+    <span><span class="badge ok">Đã có</span> chạy được trong repo</span>
+    <span><span class="badge part">Thử nghiệm</span> chạy được ở dạng POC, chưa vào repo</span>
+    <span><span class="badge todo">Chưa có</span> cần làm</span>
+  </div>
+
+  <h3 style="color:var(--a)">A. Chuẩn bị dữ liệu, dựng asset và hệ thống số liệu</h3>
+  <div class="grid">
+    <div class="card a"><h3>A1. Thu vật mẫu <span class="badge part">cam01</span></h3>
+      <dl><dt>Làm gì</dt><dd>SAM3 tách LSP, cargo, SKID, xe nâng; chọn ảnh cắt rõ nhất; chuẩn hóa màu giữa các camera.</dd>
+      <dt>Đầu ra</dt><dd><code>work/refs/</code>, <code>work/masks/</code></dd>
+      <dt>Còn thiếu</dt><dd>Thu từ nhiều camera, chuẩn hóa màu.</dd></dl></div>
+    <div class="card a"><h3>A2. Asset render <span class="badge ok">Đã có</span></h3>
+      <dl><dt>Làm gì</dt><dd>Dựng LSP, cargo (ULD, thùng), SKID bằng Blender qua CLI-Anything, texture từ ảnh thật.</dd>
+      <dt>Code</dt><dd><code>synth/build_assets.py</code>, <code>blender/build_lsp.py</code></dd>
+      <dt>Đầu ra</dt><dd><code>work/assets/*.blend</code> + JSON kích thước</dd></dl></div>
+    <div class="card a"><h3>A3. Mô hình khớp xe <span class="badge part">Thử nghiệm</span></h3>
+      <dl><dt>Làm gì</dt><dd>Mô hình hình học theo thông số chính hãng của từng loại xe, dùng để tìm vị trí và hướng xe thật (không render).</dd>
+      <dt>cam01</dt><dd>Sumitomo QuaPro 2.0–2.5 t, bánh trước đôi: cơ sở 1625 mm, vệt bánh 1405/970 mm, càng cách trục trước 477 mm.</dd></dl></div>
+    <div class="card a"><h3>A4. Bảng số liệu chuẩn <span class="badge part">Một phần</span></h3>
+      <dl><dt>Làm gì</dt><dd>Kích thước chuẩn: LSP, ULD (AKE 1.56 × 1.53 × 1.63 m), thông số xe. Dùng để dựng asset và kiểm tra hiệu chỉnh.</dd>
+      <dt>Còn thiếu</dt><dd>Kích thước LSP đo thật.</dd></dl></div>
+    <div class="card a"><h3>A5. Danh mục kịch bản <span class="badge ok">Đã có</span></h3>
+      <dl><dt>Làm gì</dt><dd>V1–V8 vi phạm (≥ 2 LSP), N1–N5 hợp lệ và dễ nhầm; tham số biến thể.</dd>
+      <dt>Nguồn</dt><dd><code>docs/superpowers/specs/</code>, <code>config.json</code></dd></dl></div>
+  </div>
+
+  <h3 style="color:var(--b); margin-top:22px">B. Chuẩn bị bối cảnh cho từng camera</h3>
+  <div class="grid">
+    <div class="card b"><h3>B1. Hiệu chỉnh camera &amp; sàn <span class="badge ok">Đã có</span></h3>
+      <dl><dt>Làm gì</dt><dd>MoGe-2 trên ảnh nền cho ra camera, mặt sàn, bản đồ XYZ của sàn.</dd>
+      <dt>Code</dt><dd><code>synth/calibrate.py</code> → <code>work/camera.json</code></dd></dl></div>
+    <div class="card b"><h3>B2. Kiểm tra bằng vật chuẩn <span class="badge part">Thử nghiệm</span></h3>
+      <dl><dt>Làm gì</dt><dd>Đo lại vật đã biết kích thước; tính hệ số bù.</dd>
+      <dt>cam01</dt><dd>Mặt sàn đúng khoảng ±5% ở vùng giữa; chiều cao ngắn đi khoảng 15–20%, nên bù ×0.85.</dd></dl></div>
+    <div class="card b"><h3>B3. Vùng đặt hàng &amp; vùng cấm <span class="badge todo">Chưa có</span></h3>
+      <dl><dt>Làm gì</dt><dd>Vùng sàn cho phép đặt; loại sát mép ảnh (sai số sàn lớn), lối người đi, vùng che cố định.</dd></dl></div>
+    <div class="card b"><h3>B4. Ánh sáng &amp; màu <span class="badge part">Một phần</span></h3>
+      <dl><dt>Làm gì</dt><dd>Ánh sáng môi trường, độ bão hòa, nhiễu, méo ống kính khi ghép.</dd>
+      <dt>Nguồn</dt><dd><code>work/scene_facts.json</code>, mục <code>composite</code> trong <code>config.json</code></dd></dl></div>
+    <div class="card b"><h3>B5. Render thử để duyệt <span class="badge todo">Chưa có</span></h3>
+      <dl><dt>Làm gì</dt><dd>Một cảnh mẫu cho mỗi camera; người duyệt trước khi chạy hàng loạt.</dd></dl></div>
+  </div>
+
+  <h3 style="color:var(--c); margin-top:22px">C. Pipeline tự động</h3>
+  <div class="grid">
+    <div class="card c"><h3>C1. RTSP &amp; lọc khung <span class="badge part">Thử nghiệm</span></h3>
+      <dl><dt>Làm gì</dt><dd>Ghi video; SAM3 tìm và bám xe; giữ khung thấy trọn xe, không chạm mép, xe đủ lớn, ưu tiên xe đang chạy.</dd>
+      <dt>Đã chạy</dt><dd>Video 10 phút cam01; 541/599 khung có xe; bám 150/150 khung liên tiếp.</dd></dl></div>
+    <div class="card c"><h3>C2. Vị trí &amp; hướng xe <span class="badge part">Thử nghiệm</span></h3>
+      <dl><dt>Làm gì</dt><dd>Khớp hình bóng cho ra vị trí và đầu càng; độ sâu MoGe để chốt khoảng cách; hướng lấy từ quỹ đạo trục trước khi xe chạy.</dd>
+      <dt>Hiện trạng</dt><dd>Vị trí lệch khoảng 0.05–0.3 m; góc theo hình bóng lệch khoảng 8°, hướng từ chuyển động tốt hơn; khoảng 1 giây mỗi khung.</dd></dl></div>
+    <div class="card c"><h3>C3. Đặt LSP &amp; cargo <span class="badge ok">Đã có</span></h3>
+      <dl><dt>Làm gì</dt><dd>Đặt theo hướng càng, số LSP và cargo theo kịch bản; render Blender.</dd>
+      <dt>Code</dt><dd><code>blender/render_anchor_poc.py</code></dd>
+      <dt>Còn thiếu</dt><dd>Kiểm tra chỗ trống (người hoặc vật cản trong vùng đặt).</dd></dl></div>
+    <div class="card c"><h3>C4. Che khuất <span class="badge part">Thử nghiệm</span></h3>
+      <dl><dt>Làm gì</dt><dd>So độ sâu từng pixel: hàng che xe; xe và người che hàng; bóng đổ cũng bị che.</dd>
+      <dt>Hiện trạng</dt><dd>Chạy được trên ảnh tĩnh; chưa gắn MoGe từng khung video.</dd></dl></div>
+    <div class="card c"><h3>C5. Ghép &amp; xuất <span class="badge ok">Đã có</span></h3>
+      <dl><dt>Làm gì</dt><dd>Ghép vào ảnh gốc; xuất ảnh kèm JSON: bbox sự kiện và từng vật, kịch bản, nhãn vi phạm, điểm tin cậy.</dd>
+      <dt>Code</dt><dd><code>synth/composite_anchor_poc.py</code> (có <code>occluder_masks</code>)</dd></dl></div>
+    <div class="card c"><h3>C6. Duyệt chất lượng <span class="badge todo">Chưa có</span></h3>
+      <dl><dt>Làm gì</dt><dd>Máy ghi chỉ số (IoU khớp, sai số chiếu lại, pixel bị che); người duyệt ngẫu nhiên một phần ảnh.</dd></dl></div>
+  </div>
+
+  <h2>Dữ liệu chuyển giữa các bước</h2>
+  <p class="lead">Mỗi bước ghi đầu ra thành file riêng, để chạy lại một bước mà không phải chạy lại cả chuỗi.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Bước</th><th>Đầu vào</th><th>Đầu ra</th></tr></thead>
+    <tbody>
+      <tr><td>A</td><td>Ảnh và video các camera, thông số chính hãng</td><td>Asset <code>.blend</code>, mô hình khớp xe, bảng số liệu</td></tr>
+      <tr><td>B</td><td>Ảnh nền từng camera, bảng số liệu</td><td>Camera, mặt sàn, hệ số bù, vùng đặt hàng, thông số ánh sáng</td></tr>
+      <tr><td>C1</td><td>Luồng RTSP</td><td>Danh sách khung dùng được, mask và vết bám xe</td></tr>
+      <tr><td>C2</td><td>Khung, mask, camera, mô hình khớp</td><td>Tư thế xe (x, y, góc), điểm tin cậy</td></tr>
+      <tr><td>C3</td><td>Tư thế xe, kịch bản, asset</td><td>Render RGBA, vị trí từng vật</td></tr>
+      <tr><td>C4</td><td>Render, độ sâu MoGe, tư thế xe</td><td>Mask che khuất</td></tr>
+      <tr><td>C5</td><td>Khung gốc, render, mask che</td><td>Ảnh vi phạm và JSON nhãn</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Phát hiện chính trên cam01</h2>
+  <ul>
+    <li>Xe trong kho mang thiết kế Sumitomo QuaPro 2.0–2.5 t, sơn vàng, bánh trước đôi (bề ngang khoảng 1.6 m). Asset xe cũ sai kích thước, nên không dùng để neo.</li>
+    <li>Camera hiệu chỉnh đúng trên mặt sàn nhưng làm chiều cao ngắn đi khoảng 15–20%; hiện bù bằng hệ số ×0.85.</li>
+    <li>Góc quay đoán từ hình bóng thiên lệch khoảng 8°; hướng suy từ chuyển động của xe (tâm trục trước) tin cậy hơn.</li>
+    <li>Che khuất bằng so độ sâu cho kết quả tương đương mask vẽ tay trên ảnh thử.</li>
+  </ul>
+  <div class="note">Các số liệu trên được kiểm tra trên 3 ảnh tĩnh và một đoạn video; chưa chạy hàng loạt.</div>
+
+  <h2>Việc tiếp theo</h2>
+  <ol class="next">
+    <li>Làm mượt hướng trên cả đoạn xe chạy (C2).</li>
+    <li>Kiểm tra chỗ trống trước càng (C3).</li>
+    <li>Gắn MoGe từng khung và che khuất cho video (C4).</li>
+    <li>Chạy hàng loạt trên video cam01, xuất bộ ảnh để duyệt (C1–C6).</li>
+    <li>Tách code theo 3 giai đoạn; thêm camera khác cho A và B.</li>
+  </ol>
+
+  <footer>Cập nhật 2026-10-01 · repo <code>aat-violation-synth</code>, nhánh <code>feat/forklift-synthetic-scenes</code></footer>
+</main>
+</body>
+</html>
