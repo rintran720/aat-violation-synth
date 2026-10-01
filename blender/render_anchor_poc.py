@@ -154,19 +154,22 @@ def main(config_path,anchor_path,output_stem):
     lsp=json.loads((work/'lsp_params.json').read_text())
     lsp_meta=json.loads((work/'assets/lsp_0.json').read_text())
     forklift_meta=json.loads((work/'assets/forklift.json').read_text())
-    cargo_meta=json.loads((work/'assets/cargo_0.json').read_text())
+    # Cargo asset per LSP, cycled; the default keeps the original three so older anchor files render unchanged.
+    cargo_assets=anchor['layout'].get('cargo_assets',['cargo_0','cargo_1','cargo_2'])
     lsp_size_y=lsp['size_y_m'];rear_y=min(v['min'][1] for k,v in forklift_meta['component_bounds'].items()
                                            if k.startswith('fork_tine'))-.08
     first_y=rear_y+lsp_size_y/2
     scenario=anchor['layout']['scenario'];lsp_count=int(anchor['layout']['lsp_count'])
-    cargo_offset=max(v['max'][1] for k,v in forklift_meta['component_bounds'].items()
-                     if k.startswith('fork_heel'))+.005-cargo_meta['bounds_min'][1]-first_y
+    heel_y=max(v['max'][1] for k,v in forklift_meta['component_bounds'].items() if k.startswith('fork_heel'))+.005
     specs=[]
     for i in range(lsp_count):
         local_y=first_y+i*(lsp_size_y+.008)
         specs.append((f'lsp_{i}','lsp',f'lsp_{i%3}',Vector((0,local_y,0))))
         if i==0 or scenario!='V6':
-            specs.append((f'cargo_{i}','cargo',f'cargo_{i%3}',Vector((0,local_y+cargo_offset,lsp['thickness_m']))))
+            asset=cargo_assets[i%len(cargo_assets)]
+            cargo_meta=json.loads((work/'assets'/f'{asset}.json').read_text())
+            cargo_offset=heel_y-cargo_meta['bounds_min'][1]-first_y  # cargo back face against the fork heel
+            specs.append((f'cargo_{i}','cargo',asset,Vector((0,local_y+cargo_offset,lsp['thickness_m']))))
     if anchor['layout'].get('include_idle_skid',True):
         skid_xy=anchor['layout']['idle_skid_local_xy_m']
         specs.append(('idle_skid','skid','skid',Vector((skid_xy[0],skid_xy[1],0))))
