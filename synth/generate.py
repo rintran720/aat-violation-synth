@@ -37,6 +37,7 @@ MIN_GAP_S = 3.0
 MAX_SIL_MOTION_DEG = 30    # silhouette and motion headings must agree; reversing / flipped fits are skipped
 OBSTACLE_MAX = .02        # fraction of the footprint allowed to overlap other objects
 ZONE_MIN = .85            # fraction of the footprint inside the placement zone
+RED_MARGIN = .01           # red-light cue difference needed to flip the fork end
 FORKS_LOADED_MAX = .25    # cargo/LSP cover of the fork area above which the truck already carries a load
 # "container" and "large white box" catch ULDs, e.g. one a truck already carries
 OBSTACLE_PROMPTS = {"person": ["person"], "forklift": ["forklift"],
@@ -110,6 +111,24 @@ def fork_area(cam, pose, sxy, shape):
     return np.asarray(im, bool)
 
 
+def red_light_cue(cam, pose, sxy, image):
+    """Red floor U light: closed end ~2.4 m behind the truck, open toward the forks. Fraction of red floor pixels in a
+    band behind the counterweight and in front of the forks; a front-heavy result means the fork end is flipped."""
+    a = np.asarray(image).astype(int); red = (a[..., 0] > 120) & (a[..., 0] - a[..., 1] > 45) & (a[..., 0] - a[..., 2] > 30)
+    def band(y0, y1):
+        poly = project(cam, [world(pose, (u * sxy, v * sxy)) for u, v in [(-1.6, y0), (1.6, y0), (1.6, y1), (-1.6, y1)]])
+        im = Image.new("L", (red.shape[1], red.shape[0])); ImageDraw.Draw(im).polygon([tuple(p) for p in poly], fill=1)
+        m = np.asarray(im, bool); return float(red[m].mean()) if m.any() else 0.
+    return band(-2.8, -1.9), band(1.0, 2.2)
+
+
+def flip(pose, body_centre_y):
+    """Same truck footprint, fork end swapped: rotate 180 degrees about the body centre."""
+    x, y, h = pose; c = world(pose, (0, body_centre_y))
+    h2 = h + math.pi; o = world((0, 0, h2), (0, body_centre_y))
+    return (c[0] - o[0], c[1] - o[1], h2)
+
+
 def segment(sam, image):
     state = sam.set_image(image); found = {}
     for cls, prompts in OBSTACLE_PROMPTS.items():
@@ -144,6 +163,7 @@ def main():
     tracks = json.loads((work / "tracks.json").read_text()); fps = tracks["fps"]
     sc = tracks["scale_correction"]; sxy, sz = sc["xy"], sc["z"]
     spec = load_spec(MODEL); axle_y = layout(spec)["front_axle"] * sxy
+    g = layout(spec); body_centre_y = (.807 + g["body_rear"]) / 2 * sxy
     P, _ = build(spec); P = P * np.array([sxy, sxy, sz], np.float32)
     lsp = json.loads(Path("config/standards.json").read_text())["lsp"]
     scen = [s for s in json.loads(Path("config/scenarios.json").read_text())["scenarios"]
@@ -179,6 +199,9 @@ def main():
         frame = work / "frames" / d["frame"]; image = Image.open(frame).convert("RGB")
         s = rng.choices(scen, weights=[x["weight"] for x in scen])[0]; n_lsp = s["layout"]["lsp_count"]
         pose = (m[0], m[1], m[2])
+        rear_red, front_red = red_light_cue(cam, pose, sxy, image); flipped = front_red > rear_red + RED_MARGIN
+        if flipped:
+            pose = flip(pose, body_centre_y)
         foot, inside = footprint_mask(cam, pose, n_lsp, lsp, sxy, zone.shape)
         if not inside:
             rejected.append((d["frame"], "row leaves the image")); continue
@@ -229,7 +252,8 @@ def main():
         meta = json.loads((out_dir / f"{stem}.json").read_text())
         meta["pipeline"] = {"stage": "C", "camera_id": cam_id, "source_video": tracks["video"], "t_s": d["t_s"], "track": d["track"],
                             "heading": {"source": "motion (front axle)", "speed_mps": round(m[3], 2), "turn_deg_s": round(m[4], 1),
-                                        "reversing": m[5], "silhouette_yaw_deg": round(math.degrees(d["pose"][2]) % 360, 1)},
+                                        "reversing": m[5] != flipped, "silhouette_yaw_deg": round(math.degrees(d["pose"][2]) % 360, 1),
+                                        "red_light_rear_front": [round(rear_red, 3), round(front_red, 3)], "flipped_by_red_light": flipped},
                             "silhouette_iou": d["iou"], "free_floor": {"in_zone": round(in_zone, 3), "blocked": round(blocked, 4), "forks_loaded": round(loaded, 3)},
                             "occlusion": occ_info, "scenario_title": s["title"]}
         write_json(out_dir / f"{stem}.json", meta)
