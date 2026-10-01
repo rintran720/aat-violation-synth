@@ -1,0 +1,59 @@
+{
+  "_doc": "Shared reference dimensions (metres) for stage A assets, the forklift fitting proxy and stage B calibration checks. 'source' says where each number comes from; 'confidence' is high for published specs, medium for values measured from cam01 and accepted by the user.",
+  "lsp": {
+    "size_m": [1.9, 1.85],
+    "thickness_m": 0.09,
+    "corner_radius_m": 0.045,
+    "source": "MoGe-2 measurement on cam01 single sheets; user confirmed reasonable 2026-10-01; thickness is the user's estimate",
+    "confidence": "medium"
+  },
+  "skid": {
+    "size_m": [1.2, 1.0],
+    "height_m": 0.151,
+    "source": "existing skid asset, fitted to cam01 crops",
+    "confidence": "medium"
+  },
+  "uld": {
+    "AKE": {
+      "base_m": [1.56, 1.53], "top_width_m": 2.01, "height_m": 1.63, "contour": "one sloped side (LD3)",
+      "source": "IATA ULD standard (LD3)", "confidence": "high"
+    },
+    "AKH": {
+      "base_m": [1.56, 1.53], "top_width_m": 2.44, "height_m": 1.14, "contour": "sloped sides (LD3-45, narrow-body)",
+      "source": "IATA ULD standard (LD3-45); verify against site containers", "confidence": "medium"
+    },
+    "PMC": {
+      "base_m": [3.18, 2.44], "max_height_m": 1.63, "contour": "flat pallet, net-covered load; lower-deck height shown",
+      "source": "IATA ULD standard (P6P, 125x96 in)", "confidence": "high"
+    },
+    "PAG": {
+      "base_m": [3.18, 2.24], "max_height_m": 1.63, "contour": "flat pallet, net-covered load; lower-deck height shown",
+      "source": "IATA ULD standard (P1P, 125x88 in)", "confidence": "high"
+    }
+  },
+  "forklift": {
+    "sumitomo_quapro_2t5_dual": {
+      "seen_on": ["ch16 (cam01)"],
+      "wheelbase_m": 1.625,
+      "tread_front_dual_m": 1.405,
+      "tread_rear_m": 0.97,
+      "overall_width_dual_m": 1.59,
+      "body_width_m": 1.16,
+      "axle_to_fork_face_m": 0.477,
+      "length_to_fork_face_m": 2.615,
+      "overhead_guard_m": 2.13,
+      "mast_lowered_m": 1.995,
+      "fork_length_m": 1.07,
+      "fork_spread_m": [0.25, 1.01],
+      "tyre_front": "5.50-15 dual",
+      "tyre_rear": "6.0-9",
+      "tyre_front_radius_m": 0.33,
+      "tyre_front_width_m": 0.16,
+      "tyre_rear_radius_m": 0.27,
+      "tyre_rear_width_m": 0.15,
+      "_tyre_note": "radii/widths derived from tyre sizes; dual pair placed from overall_width_dual (the published dual tread does not reconcile with it)",
+      "source": "Sumitomo NACCO QuaPro catalogue (11FD25PAXIII); model identified from cam01 video, user confirmed design; 2.0 vs 2.5 t not confirmed (2.0 t has 0.92 m forks)",
+      "confidence": "high for spec, medium for model match"
+    }
+  }
+}
