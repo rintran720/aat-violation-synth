@@ -15,6 +15,12 @@ def main(config_path,anchor_path,output_stem):
     background=np.asarray(Image.open(root/anchor['background_image']).convert('RGB'))
     rgba=np.asarray(Image.open(work/'renders'/f'{output_stem}.png').convert('RGBA'))
     if rgba.shape[:2]!=background.shape[:2]:raise ValueError('Render and background dimensions differ')
+    # SAM3 masks of real objects standing between the camera and the render (e.g. the
+    # source forklift when its forks point away): the photo keeps those pixels.
+    occluders=anchor.get('occluder_masks',[])
+    if occluders:
+        rgba=rgba.copy()
+        for path in occluders:rgba[np.asarray(Image.open(root/path).convert('L'))>127,3]=0
     support_mask=rgba[...,3]>0
     composite_cfg=cfg['composite'];height,width=background.shape[:2]
     protected=[(0,0,width,max(54,int(height*.05)))]
@@ -32,7 +38,7 @@ def main(config_path,anchor_path,output_stem):
     meta=json.loads((dest/f'{output_stem}.json').read_text())
     meta['composite']={'output_png':str((dest/f'{output_stem}.png').relative_to(root)),
         'output_jpg':str((dest/f'{output_stem}.jpg').relative_to(root)),
-        'rendered_support_pixels':int(support.sum()),
+        'rendered_support_pixels':int(support.sum()),'occluder_masks':occluders,
         'background_unchanged_outside_support':bool(np.array_equal(result[~support],background[~support])),
         'object_render_contains_forklift':False}
     if not meta['composite']['background_unchanged_outside_support']:

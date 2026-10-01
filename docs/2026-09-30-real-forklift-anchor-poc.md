@@ -101,3 +101,18 @@ HF_HOME=work/huggingface .venv/bin/python -m synth.infer_moge_frame data/cam01/r
 ```
 
 Bring back `work/masks/s_018/`, `work/refs/`, `work/refs/index.json`, `work/camera.json`, `work/points_world.npy`, `work/scene_facts.json`, `work/calibration.json`, and the full-resolution `work/points_s_018_moge.npy` plus `work/points_s_018_moge_valid.npy`. Do not copy the Hugging Face token/cache. `synth.infer_moge_frame` saves the exact-frame MoGe point map and valid mask; the standard calibrator remains based on the clean camera background. The official SAM3 setup requires checkpoint access; MoGe installation and checkpoint loading follow the [official MoGe repository](https://github.com/microsoft/MoGe).
+
+## Windows GPU run: s_018, s_026, s_067, s_071 (2026-09-30)
+
+Rebuilt all eight assets on the Windows RTX 3080 workstation (CLI-Anything harness cloned to `tools/CLI-Anything`, currently untracked; `PYTHONUTF8=1` is required because the harness writes non-ASCII into generated scripts under the cp1252 default). SAM3 masks for `forklift`, `LSP`, `cargo`, `SKID` were generated on GPU for all four frames under `work/masks/s_*/`.
+
+Each frame renders scenario V1 (two LSPs in series, cargo on both) with anchors in `work/anchor_s{018,026,067,071}.json`; outputs are `work/out/viol_s*.{jpg,png,json}`.
+
+| Frame | Anchor | Baseline ratio | Notes |
+|---|---|---|---|
+| s_018 | fork tip/heel | 1.44 | forks toward camera; load correctly in front of the truck. Tip pixel is the weakest estimate. |
+| s_026 | fork tip/heel | 1.94 | truck is small and distant; anchor is unreliable, keep only as a stress sample. |
+| s_067 | fork tip/heel | 0.99 | best fit; mast and heel reprojections match the photo. |
+| s_071 | near-side wheel contacts (`same_side: negative`) | 0.89 | forks point away, so the load is behind the truck: `occluder_masks` (SAM3 `forklift_1`) keeps the real truck in front. |
+
+`synth.composite_anchor_poc` now accepts an optional `occluder_masks` list in the anchor file; pixels inside those masks keep the photograph, so a real object nearer to the camera hides the render. It is a 2D holdout, valid only when the whole masked object is in front of the inserted load.
