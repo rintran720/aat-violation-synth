@@ -58,8 +58,14 @@ def load_asset(asset_path, prefix, scene, transform):
 
 
 def main(config_path,anchor_path,output_stem):
-    root=Path.cwd();cfg=json.loads(Path(config_path).read_text())
+    root=Path.cwd();import sys;sys.path.insert(0,str(root))
+    from synth.common import load_config  # resolves per-camera configs that "extends" config.json
+    cfg=load_config(config_path)
     anchor=json.loads(Path(anchor_path).read_text());work=root/cfg['work_dir']
+    shared=root/cfg.get('shared_work_dir',cfg['work_dir'])  # assets and LSP params are shared across cameras
+    # Apparent-scale correction of this camera (synth.scale_correction): rendered sizes match real objects here.
+    sc=anchor.get('scale_correction') or (json.loads((work/'scale_correction.json').read_text()) if (work/'scale_correction.json').exists() else {})
+    sxy,sz=float(sc.get('xy',1.)),float(sc.get('z',1.))
     camera_cfg=json.loads((root/anchor['source_calibration']).read_text())
     facts=json.loads((work/'scene_facts.json').read_text())
     floor_points=np.load(root/anchor['source_floor_points'])
@@ -151,9 +157,9 @@ def main(config_path,anchor_path,output_stem):
     bsdf=floor_mat.node_tree.nodes.get('Principled BSDF');bsdf.inputs['Base Color'].default_value=(.26,.27,.245,1)
     bsdf.inputs['Roughness'].default_value=.82;floor.data.materials.append(floor_mat)
 
-    lsp=json.loads((work/'lsp_params.json').read_text())
-    lsp_meta=json.loads((work/'assets/lsp_0.json').read_text())
-    forklift_meta=json.loads((work/'assets/forklift.json').read_text())
+    lsp=json.loads((shared/'lsp_params.json').read_text())
+    lsp_meta=json.loads((shared/'assets/lsp_0.json').read_text())
+    forklift_meta=json.loads((shared/'assets/forklift.json').read_text())
     # Cargo asset per LSP, cycled; the default keeps the original three so older anchor files render unchanged.
     cargo_assets=anchor['layout'].get('cargo_assets',['cargo_0','cargo_1','cargo_2'])
     lsp_size_y=lsp['size_y_m'];rear_y=min(v['min'][1] for k,v in forklift_meta['component_bounds'].items()
@@ -167,7 +173,7 @@ def main(config_path,anchor_path,output_stem):
         specs.append((f'lsp_{i}','lsp',f'lsp_{i%3}',Vector((0,local_y,0))))
         if i==0 or scenario!='V6':
             asset=cargo_assets[i%len(cargo_assets)]
-            cargo_meta=json.loads((work/'assets'/f'{asset}.json').read_text())
+            cargo_meta=json.loads((shared/'assets'/f'{asset}.json').read_text())
             cargo_offset=heel_y-cargo_meta['bounds_min'][1]-first_y  # cargo back face against the fork heel
             specs.append((f'cargo_{i}','cargo',asset,Vector((0,local_y+cargo_offset,lsp['thickness_m']))))
     if anchor['layout'].get('include_idle_skid',True):
@@ -175,14 +181,15 @@ def main(config_path,anchor_path,output_stem):
         specs.append(('idle_skid','skid','skid',Vector((skid_xy[0],skid_xy[1],0))))
     objects_meta=[];event_boxes=[]
     for name,kind,asset,local in specs:
-        location=base+rotate.to_3x3()@local
-        transform=Matrix.Translation(location)@rotate
-        objects,corners,_=load_asset(work/'assets'/f'{asset}.blend',name,scene,transform)
+        location=base+rotate.to_3x3()@Vector((local.x*sxy,local.y*sxy,local.z*sz))
+        transform=Matrix.Translation(location)@rotate@Matrix.Diagonal((sxy,sxy,sz,1))
+        objects,corners,_=load_asset(shared/'assets'/f'{asset}.blend',name,scene,transform)
         box=projected_bbox(scene,camera,corners,width,height)
         if box[0]<0 or box[1]<0 or box[2]>width or box[3]>height:
             raise ValueError(f'{name} clipped by image: {box}')
         objects_meta.append({'name':name,'class':kind,'asset':asset,'location_world_m':[round(v,4) for v in location],
-                             'bbox_2d':box,'dimensions_m':json.loads((work/'assets'/f'{asset}.json').read_text())['dimensions_m']})
+                             'bbox_2d':box,'dimensions_m':json.loads((shared/'assets'/f'{asset}.json').read_text())['dimensions_m'],
+                             'scale_correction_xyz':[sxy,sxy,sz]})
         if kind in ('lsp','cargo'):event_boxes.append(box)
 
     (work/'renders').mkdir(parents=True,exist_ok=True);(work/'scenes').mkdir(parents=True,exist_ok=True)
@@ -202,6 +209,7 @@ def main(config_path,anchor_path,output_stem):
                   'model_baseline_m':round(model_baseline,4) if 'landmarks' not in bg else None,
                   'baseline_ratio':round(measured_baseline/model_baseline,4) if 'landmarks' not in bg else None},
           'scenario':scenario,'lsp_count':lsp_count,'is_violation':lsp_count>=2,'objects':objects_meta,
+          'scale_correction':{'xy':sxy,'z':sz,'source':'anchor' if anchor.get('scale_correction') else 'camera scale_correction.json' if sc else 'none'},
           'event':{'class':'Forklift Pushing Multiple Lsps' if lsp_count>=2 else 'Forklift Pushing One LSP',
                    'bbox_2d':event_box},
           'limitations':['Anchor pixels are manually estimated, not SAM3 keypoints.',

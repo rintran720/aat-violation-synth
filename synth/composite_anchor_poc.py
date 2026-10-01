@@ -6,11 +6,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from synth.common import load_config
 from synth.composite_violation import composite
 
 
 def main(config_path,anchor_path,output_stem):
-    root=Path.cwd();cfg=json.loads(Path(config_path).read_text())
+    root=Path.cwd();cfg=load_config(config_path)  # per-camera configs may "extends" config.json
     anchor=json.loads(Path(anchor_path).read_text());work=root/cfg['work_dir']
     background=np.asarray(Image.open(root/anchor['background_image']).convert('RGB'))
     rgba=np.asarray(Image.open(work/'renders'/f'{output_stem}.png').convert('RGBA'))
