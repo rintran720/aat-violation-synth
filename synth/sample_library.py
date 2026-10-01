@@ -126,7 +126,7 @@ def main():
             frames = extract_frames(video, args.every, Path(tmp))
             floor_rgb = []
             for idx, frame in enumerate(frames):
-                t = round(idx * args.every, 1)
+                t = round((idx + .5) * args.every, 1)  # ffmpeg fps=1/N picks the frame in the middle of each N-s slot
                 image = Image.open(frame).convert("RGB"); pixels = np.asarray(image)
                 gray = np.asarray(image.convert("L"), dtype=np.float32)
                 occupied = np.zeros(gray.shape, bool)
