@@ -66,6 +66,7 @@ TEXTURES={'tex_yellow':'forklift_yellow.png','tex_white':'uld_white_front.png',
 TEXTURES.update(tex_body_side='forklift_body_side.png',tex_counter_side='forklift_counter_side.png',
                 tex_side_panel='forklift_side_panel.png',tex_roof='forklift_roof.png',
                 tex_white_roof='uld_white_roof.png',tex_dark_roof='uld_dark_roof.png')
+TEXTURES.update({f'tex_wrap_{tone}_{face}':f'wrap_{tone}_{face}.png' for tone in ['brown','grey'] for face in ['side','front','top']})
 
 # User-reviewed correction: the real forklift paint is darker and richer than
 # the initial reconstruction. Apply in linear material colour, not to the CCTV.

@@ -113,6 +113,25 @@ def run():
         Image.fromarray(np.clip(result[..., :3],0,255).astype('uint8')).save(output)
         sources.append(dict(texture=str(output), source=str(src), corners_px=corners,
                             method='reviewed surface quadrilateral; other sides approximate'))
+    # Stage A1 library crops (any camera): reviewed face quadrilaterals in crop pixels, TL/TR/BR/BL.
+    library_patches = {
+        'wrap_brown_top': ('wrapped_cargo/ch13_0378.0s_0.png', [[4,16],[99,3],[134,23],[31,45]]),
+        'wrap_brown_front': ('wrapped_cargo/ch13_0378.0s_0.png', [[32,47],[134,25],[138,142],[41,164]]),
+        'wrap_brown_side': ('wrapped_cargo/ch13_0378.0s_0.png', [[4,18],[30,46],[37,148],[8,126]]),
+        'wrap_grey_top': ('wrapped_cargo/ch10_0390.0s_0.png', [[28,2],[100,15],[140,72],[66,60]]),
+        'wrap_grey_front': ('wrapped_cargo/ch10_0390.0s_0.png', [[67,64],[133,74],[126,148],[68,158]]),
+        'wrap_grey_side': ('wrapped_cargo/ch10_0390.0s_0.png', [[25,4],[64,60],[64,170],[5,100]]),
+    }
+    for name, (relative, corners) in library_patches.items():
+        src = work/'library'/relative
+        corners = np.asarray(corners, float); corners = corners.mean(axis=0) + .94*(corners-corners.mean(axis=0))
+        result = rectify(np.array(Image.open(src).convert('RGBA'), dtype=float), corners)
+        if np.mean(result[..., 3] > 200) < .90:
+            raise ValueError(f'{name}: surface patch contains too much non-object area')
+        output = dest/f'{name}.png'
+        Image.fromarray(np.clip(result[..., :3],0,255).astype('uint8')).save(output)
+        sources.append(dict(texture=str(output), source=str(src), corners_px=corners.tolist(),
+                            method='reviewed library face quadrilateral, 6 % inset; other sides approximate'))
     measured = calibration['lsp_measured_size_m']
     size = cfg.get('lsp_size_m') or measured
     if not size or min(size) <= 0:

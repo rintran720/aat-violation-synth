@@ -9,7 +9,7 @@ work=Path(sys.argv[sys.argv.index('--')+1]).resolve()
 cfg=json.loads(Path('config.json').read_text())
 colour_factor=cfg.get('asset_appearance',{}).get('saturation_multiplier',1.2)
 band_height=cfg.get('lsp_edge_markings',{}).get('height_m',.03)
-names=['forklift','cargo_0','cargo_1','cargo_2','skid','lsp_0','lsp_1','lsp_2']
+names=['forklift']+[f'cargo_{i}' for i in range(11)]+['skid','lsp_0','lsp_1','lsp_2']
 results=[]
 for name in names:
     path=work/'assets'/f'{name}.blend'

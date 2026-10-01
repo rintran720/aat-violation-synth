@@ -99,6 +99,10 @@ def palette(a):
         ('tex_dark_roof',(.15,.17,.18),.82,.12),
         ('wheel_rim',(.045,.049,.047),.82,.18),
         ('wheel_fastener',(.028,.031,.030),.88,.12),
+        # Stretch-wrapped pallet loads; textures come from the multi-camera library (stage A1).
+        ('tex_wrap_brown_side',(.30,.27,.20),.55,0),('tex_wrap_brown_front',(.30,.27,.20),.55,0),
+        ('tex_wrap_brown_top',(.33,.31,.26),.5,0),('tex_wrap_grey_side',(.52,.53,.56),.45,0),
+        ('tex_wrap_grey_front',(.52,.53,.56),.45,0),('tex_wrap_grey_top',(.62,.63,.65),.4,0),
     ]: a.material(*spec)
 
 
@@ -222,6 +226,36 @@ def carton(a):
     p('rear_tape',(0,-.394,.75),(.08,.01,.25),'tape',bevel=.002)
 
 
+def pallet(p,w=1.2,d=1.0):
+    for x in [-w/2+.08,0,w/2-.08]:
+        p(f'pallet_runner_{x:+.2f}',(x,0,.05),(.14,d,.10),'wood',bevel=.006)
+    p('pallet_deck',(0,0,.13),(w,d,.04),'wood',bevel=.006)
+
+
+def wrapped(a,tone,size,on_pallet=True):
+    """Stretch-wrapped load, on a 1.2 x 1.0 m pallet or straight on the LSP. size = (width, depth, load height) m."""
+    p=a.part;w,d,h=size;base=.15 if on_pallet else 0.
+    if on_pallet:pallet(p,w,d)
+    p('wrapped_load',(0,0,base+h/2),(w-.02,d-.02,h),f'tex_wrap_{tone}_side',bevel=.035)
+    if a.stage==1:return
+    # Front and top photo patches on thin panels so the side texture does not repeat their labels.
+    p('front_film',(0,d/2-.004,base+h/2),(w-.08,.012,h-.08),f'tex_wrap_{tone}_front',bevel=.003)
+    p('top_film',(0,0,base+h+.002),(w-.08,d-.08,.012),f'tex_wrap_{tone}_top',bevel=.003)
+
+
+def carton_stack(a,nx=2,ny=2,nz=2,box=(.56,.46,.42),on_pallet=True):
+    """Loose cartons (no wrap) on a 1.2 x 1.0 m pallet or straight on the LSP; printed face on the front row."""
+    p=a.part;bw,bd,bh=box;base=.15 if on_pallet else 0.
+    if on_pallet:pallet(p)
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                x=(i-(nx-1)/2)*(bw+.01);y=(j-(ny-1)/2)*(bd+.01);z=base+bh/2+k*(bh+.005)
+                p(f'carton_{i}{j}{k}',(x,y,z),(bw,bd,bh),'tex_carton_plain',bevel=.02)
+                if a.stage>1 and j==ny-1:
+                    p(f'carton_print_{i}{j}{k}',(x,y+bd/2+.004,z),(bw-.05,.008,bh-.05),'tex_carton',bevel=.002)
+
+
 def skid(a):
     p=a.part
     # A provisional standard block pallet. Real segmentation has no complete deck.
@@ -240,10 +274,16 @@ def skid(a):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pass-number',type=int,choices=[1,2,3],required=True)
-    parser.add_argument('--asset',choices=['forklift','cargo_0','cargo_1','cargo_2','skid'])
+    parser.add_argument('--asset',choices=['forklift']+[f'cargo_{i}' for i in range(11)]+['skid'])
     args=parser.parse_args();cfg=load_config();work=cfg['work'].resolve()
     for name in ['cli','logs','assets_raw','assets','previews']:(work/name).mkdir(exist_ok=True)
-    builders={'forklift':forklift,'cargo_0':uld,'cargo_1':lambda a:uld(a,True),'cargo_2':carton,'skid':skid}
+    builders={'forklift':forklift,'cargo_0':uld,'cargo_1':lambda a:uld(a,True),'cargo_2':carton,
+              'cargo_3':lambda a:wrapped(a,'brown',(1.2,1.0,1.1)),'cargo_4':lambda a:wrapped(a,'grey',(1.2,1.0,1.25)),
+              'cargo_5':lambda a:wrapped(a,'brown',(1.2,1.0,1.7)),'cargo_6':lambda a:wrapped(a,'grey',(1.2,1.0,.75)),
+              'cargo_7':carton_stack,
+              # Same loads without a wooden pallet: cargo on an LSP may or may not sit on one (user, 2026-10-01).
+              'cargo_8':lambda a:wrapped(a,'brown',(1.2,1.0,1.1),False),'cargo_9':lambda a:wrapped(a,'grey',(1.2,1.0,1.25),False),
+              'cargo_10':lambda a:carton_stack(a,on_pallet=False),'skid':skid}
     for name,builder in builders.items():
         if args.asset and args.asset!=name:continue
         a=Author(name,work,args.pass_number);palette(a);builder(a);script=a.finish()
