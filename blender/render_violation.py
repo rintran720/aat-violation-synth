@@ -82,42 +82,63 @@ def add_occupant(forklift_transform):
     return objects,corners
 
 
+def floor_ribbon(name,path,width,z):
+    """Flat strip of constant width along a 2D polyline, with mitred corners; UV v runs across it."""
+    verts=[];uvs=[]
+    for i,p in enumerate(path):
+        a=Vector(path[max(i-1,0)]);b=Vector(path[min(i+1,len(path)-1)])
+        tangent=(b-a).normalized();normal=Vector((-tangent.y,tangent.x))
+        if 0<i<len(path)-1:
+            t_in=(Vector(p)-a).normalized();n_in=Vector((-t_in.y,t_in.x))
+            normal=normal/max(normal.dot(n_in),.2)  # mitre: keep the strip width at corners
+        for side in (-1,1):
+            q=Vector(p)+normal*side*width/2;verts.append((q.x,q.y,z));uvs.append((i/(len(path)-1),(side+1)/2))
+    faces=[(2*i,2*i+2,2*i+3,2*i+1) for i in range(len(path)-1)]
+    mesh=bpy.data.meshes.new(name);mesh.from_pydata(verts,[],faces);mesh.update()
+    uv=mesh.uv_layers.new(name='UVMap')
+    for loop in mesh.loops:uv.data[loop.index].uv=uvs[loop.vertex_index]
+    return mesh
+
+
+def floor_light_material(name,colour,strength,falloff):
+    """Unlit red emission; alpha fades toward the strip edges, so it reads as light on the floor."""
+    mat=bpy.data.materials.new(name);mat.diffuse_color=(*colour,1);mat.use_nodes=True
+    nodes=mat.node_tree.nodes;links=mat.node_tree.links;nodes.clear()
+    coord=nodes.new('ShaderNodeTexCoord');split=nodes.new('ShaderNodeSeparateXYZ')
+    centred=nodes.new('ShaderNodeMath');centred.operation='MULTIPLY_ADD'
+    centred.inputs[1].default_value=2;centred.inputs[2].default_value=-1
+    distance=nodes.new('ShaderNodeMath');distance.operation='ABSOLUTE'
+    profile=nodes.new('ShaderNodeMath');profile.operation='SUBTRACT';profile.inputs[0].default_value=1
+    shaped=nodes.new('ShaderNodeMath');shaped.operation='POWER';shaped.inputs[1].default_value=falloff
+    emission=nodes.new('ShaderNodeEmission');emission.inputs[0].default_value=(*colour,1)
+    emission.inputs[1].default_value=strength
+    transparent=nodes.new('ShaderNodeBsdfTransparent');mix=nodes.new('ShaderNodeMixShader')
+    output=nodes.new('ShaderNodeOutputMaterial')
+    links.new(coord.outputs['UV'],split.inputs[0]);links.new(split.outputs['Y'],centred.inputs[0])
+    links.new(centred.outputs[0],distance.inputs[0]);links.new(distance.outputs[0],profile.inputs[1])
+    links.new(profile.outputs[0],shaped.inputs[0]);links.new(shaped.outputs[0],mix.inputs[0])
+    links.new(transparent.outputs[0],mix.inputs[1]);links.new(emission.outputs[0],mix.inputs[2])
+    links.new(mix.outputs[0],output.inputs[0])
+    return mat
+
+
 def add_red_u_light(forklift_transform,settings):
-    """Vehicle-mounted red projector plus its depth-occluded U floor footprint."""
-    for side in (-1,1):
-        emitter_data=bpy.data.lights.new(f'vehicle_red_u_projector_{side}','AREA')
-        emitter_data.energy=settings['projector_power_w'];emitter_data.shape='RECTANGLE'
-        emitter_data.size=.16;emitter_data.size_y=.10
-        emitter_data.color=(1.0,.006,.003);emitter_data.use_shadow=True
-        emitter=bpy.data.objects.new(f'vehicle_red_u_projector_{side}',emitter_data)
-        bpy.context.scene.collection.objects.link(emitter)
-        source=Vector((side*.55,-.55,.72));target=Vector((side*settings['side_outer_x_m'],-.45,0))
-        emitter.location=forklift_transform@source
-        direction=forklift_transform.to_3x3()@(target-source)
-        emitter.rotation_euler=direction.to_track_quat('-Z','Y').to_euler()
-    points=[]
-    # Left arm -> rounded rear arc -> right arm. Coordinates are forklift-local.
-    outer=settings['side_outer_x_m'];front=settings['open_front_y_m']
-    rear=settings['rear_center_y_m'];half=settings['rear_half_width_m'];depth=settings['rear_depth_m']
-    points.append((-outer,front,.018));points.append((-outer,rear,.018))
-    for i in range(25):
-        angle=math.pi-(math.pi*i/24)
-        points.append((half*math.cos(angle),rear-depth*math.sin(angle),.018))
-    points.append((outer,rear,.018));points.append((outer,front,.018))
-    spline_points=[forklift_transform@Vector(p) for p in points]
+    """Thin red U projected on the floor around the forklift, open toward the forks.
+
+    Flat emissive strips just above the floor plane; the forklift, LSPs and cargo
+    occlude them through the normal depth test."""
+    outer=settings['side_outer_x_m'];front=settings['open_front_y_m'];rear=settings['rear_y_m']
+    # Left arm -> square rear bar -> right arm, forklift-local metres.
+    path=[(-outer,front),(-outer,rear),(outer,rear),(outer,front)]
     objects=[]
-    for name,width,strength in [('red_u_safety_light_glow',settings['glow_width_m'],settings['glow_emission_strength']),
-                                ('red_u_safety_light',settings['core_width_m'],settings['core_emission_strength'])]:
-        curve=bpy.data.curves.new(name+'_curve','CURVE');curve.dimensions='3D'
-        curve.resolution_u=2;curve.bevel_depth=width/2;curve.bevel_resolution=3
-        spline=curve.splines.new('POLY');spline.points.add(len(spline_points)-1)
-        for slot,point in zip(spline.points,spline_points):slot.co=(*point,1)
-        obj=bpy.data.objects.new(name,curve);bpy.context.scene.collection.objects.link(obj)
-        bpy.context.view_layer.objects.active=obj;obj.select_set(True);bpy.ops.object.convert(target='MESH')
-        obj=bpy.context.object;obj.name=name
+    for name,width,strength,falloff,z in [
+            ('red_u_safety_light_glow',settings['glow_width_m'],settings['glow_emission_strength'],2.0,.002),
+            ('red_u_safety_light',settings['core_width_m'],settings['core_emission_strength'],.5,.003)]:
+        obj=bpy.data.objects.new(name,floor_ribbon(name,path,width,z))
+        bpy.context.scene.collection.objects.link(obj);obj.matrix_world=forklift_transform
+        obj.visible_shadow=False
         colour=(1.0,.006,.003) if 'glow' not in name else (1.0,.018,.009)
-        obj.data.materials.append(scene_material(name+'_emission',colour,strength));objects.append(obj)
-    bpy.ops.object.select_all(action='DESELECT')
+        obj.data.materials.append(floor_light_material(name+'_emission',colour,strength,falloff));objects.append(obj)
     bpy.context.view_layer.update()
     corners=[obj.matrix_world@Vector(c) for obj in objects for c in obj.bound_box]
     return objects,corners
@@ -249,8 +270,8 @@ def main(config_path,scenario='V1',lsp_count=2,arrangement='in_series',output_st
     u_objects,u_corners=add_red_u_light(forklift_transform,red_settings)
     actors.append((u_objects,dict(name='red_u_safety_light',**{'class':'safety_light'},asset='sample_matched_emissive_floor_curve',
         location=list(base),rot_z_deg=heading,bbox_2d=projected_bbox(scene,camera,u_corners,W,H),
-        mask_color_rgb=[255,128,64],appearance={'shape':'rounded U open toward the forks',**red_settings,
-        'source':'vehicle-mounted area projectors','camera_occlusion':'depth-tested against forklift geometry'})))
+        mask_color_rgb=[255,128,64],appearance={'shape':'square-cornered U open toward the forks',**red_settings,
+        'source':'flat emissive floor strips (projected line light)','camera_occlusion':'depth-tested against scene geometry'})))
     all_corners.extend(u_corners)
     meta=dict(image=f'{output_stem}.jpg',lossless_image=f'{output_stem}.png',camera_id=cfg['camera_id'],source_image=cfg['background_image'],
               violation_id=scenario,arrangement=arrangement,heading_deg=heading,lsp_count=lsp_count,
