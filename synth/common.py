@@ -1,9 +1,17 @@
 import json
+import os
 from pathlib import Path
 
 
-def load_config(path="config.json"):
-    cfg = json.loads(Path(path).read_text())
+def load_config(path=None):
+    """Read the config named by `path`, else $SYNTH_CONFIG, else config.json.
+    A config with "extends": "<base.json>" overrides only the keys it sets (per-camera configs)."""
+    path = Path(path or os.environ.get("SYNTH_CONFIG", "config.json"))
+    cfg = json.loads(path.read_text())
+    if "extends" in cfg:
+        base = load_config(cfg.pop("extends"))
+        base.pop("work", None)
+        cfg = {**base, **cfg}
     cfg["work"] = Path(cfg["work_dir"])
     return cfg
 

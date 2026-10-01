@@ -1,0 +1,13 @@
+{
+  "extends": "config.json",
+  "camera_id": "ch13",
+  "background_image": "data/cameras/ch13/background.jpg",
+  "object_frames_dir": "data/cameras/ch13/references",
+  "work_dir": "work/cameras/ch13",
+  "lsp_size_m": [
+    1.9,
+    1.85
+  ],
+  "source_video": "data/multicam/video/ch13_20261001_090833.mp4",
+  "shared_work_dir": "work"
+}
