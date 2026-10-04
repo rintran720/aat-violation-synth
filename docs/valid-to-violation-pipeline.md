@@ -1,80 +1,62 @@
 # Valid frame → reviewed violation image
 
-`synth/valid_to_violation.py` accepts one valid **cam01** CCTV image containing
-one forklift-loaded LSP. Its default workflow edits that real image in two
-stages: add one empty LSP, then add one cargo. Forklift, LSP, SKID and cargo
-appearance references come from Step A's `work/refs/index.json` by default. Use
-`--reference-map` to supply four selected images from another catalogue.
+`synth/valid_to_violation.py` accepts one valid CCTV image containing one forklift-loaded LSP and edits that real
+image in two stages: add one empty LSP, then add one cargo. Each stage is gated by code first; Astra only scores
+realism. Forklift, LSP, SKID and cargo appearance references come from Step A's `work/refs/index.json` by default,
+or from `--reference-map` (recommended: `synth.catalogue_reference_map`, view-matched renders of the 3D catalogue).
 
-## Default workflow
+## Workflow
 
-1. SAM3 segments forklift, LSP, cargo and floor in the input. It locates the
-   central loaded LSP and its exposed front rim. MoGe computes a point map and
-   floor-plane diagnostic for the input; the saved cam01 calibration projects
-   an equal-size second LSP from the contact edge. A hidden edge is recorded
-   as inferred geometry, never claimed to be visibly measured. If the source
-   edge cannot be localized, the script stops with `--contact-edge` guidance.
-2. Imagegen receives the real source, Step A references and a polygon guide.
-   It adds **one empty LSP**. The script preserves original pixels outside a
-   bounded edit region and restores original SAM3 objects inside it. SAM3
-   checks that one new LSP covers the planned footprint, is not oversized and
-   has no new cargo. Astra checks only texture, edges, shadow and lighting.
-   Failed candidates receive the measured errors on the next attempt.
-3. Only after the empty LSP passes, imagegen adds **one cargo** using the Step A
-   cargo crop. Every retry begins from the same accepted empty-LSP image. SAM3
-   checks one new cargo, its support on the LSP and exposed LSP geometry. The
-   script again restores pixels outside the allowed region and original objects.
-   Astra checks visual realism. Only a passing image is published.
+1. **Anchor.** SAM3 segments forklift, LSP, cargo and floor. The loaded LSP's front edge is measured on the
+   photo as the edge of its **top face**: line segments (OpenCV LSD) on the mask's lower outline, slanted edges
+   allowed; when the top-face edge and the side face's floor contact both show (two parallel lines ≤ 15 px apart)
+   the upper one is kept. Without a measurable edge it falls back to the mask's lowest row. `--contact-edge`
+   overrides it (recorded as a manual anchor).
+2. **Geometry.** The camera (`--camera`, default `work/camera.json`, principal point from `K_norm`) projects an
+   equal second sheet (`lsp_measured_size_m` in `--calibration`) from that edge at top-face height. The source edge
+   must measure within ±25 % of the calibrated width.
+3. **Empty LSP.** The image model gets the source, the references and the geometry guide. Its raw output is
+   composited into the source inside a bounded region only, colour-matched to the source, with SAM3 objects kept
+   pixel for pixel and the edit feathered 2 px around them. Gates (all must pass):
+   - raw output keeps the frame's aspect ratio and size;
+   - raw drift: how much the model changed what it had to keep (outside the region, on protected objects),
+     ≤ 8 % pixels and mean RGB delta ≤ 9;
+   - no geometry-guide line colours drawn into the photo;
+   - composite integrity (outside pixels exactly the source's);
+   - SAM3: one new LSP, coverage ≥ 60 %, IoU ≥ 0.5, ≤ 20 % outside the target, ≥ 85 % of the strip along the shared
+     edge covered (full width), no cargo yet;
+   - Astra on a before/after close-up of the edit: scores 1–5 for edges, lighting, texture and contact shadow plus a
+     list of located defects; code accepts only if every score ≥ 3, the mean ≥ 3.5 and Astra accepts.
+   Failures (measured and visual) are fed to the next attempt.
+4. **Cargo.** Starting from the accepted sheet each retry, the model adds one cargo. Its target box is the projection
+   of a 3D box of the reference map's cargo `size_m` standing on the new sheet; without a size, the original load is
+   scaled. Same gates, with SAM3 checking one new cargo supported by the new sheet, its height and an unchanged
+   exposed deck. Only a passing image is published.
 
-All masks, point-map diagnostics, geometry and candidate paths are recorded in
-the timestamped `work/out/<output-stem>_vision_*` run directory and its
-`report.json`. SAM3 masks and MoGe point maps are cached by input hash under
-`work/vision_cache`. A pass means the configured image checks passed; inferred
-geometry cannot prove dimensions hidden behind the original cargo.
+References are **appearance only**: every prompt says so, and sizes and positions come from the geometry above.
+All masks, geometry, close-ups, scores and candidate paths are in `work/out/<output-stem>_vision_*/report.json`.
+SAM3 masks are cached by input hash under `work/vision_cache`. `--moge` adds a MoGe floor-plane diagnostic to the
+report (not a gate).
 
 ## Run
 
-The default editor uses a signed-in Codex CLI with `gpt-6-astra` and its
-`image_gen.imagegen` tool. SAM3, MoGe, calibration and Step A references must
-be installed locally. The optional `--editor api` uses `OPENAI_API_KEY` and the
-imagegen skill CLI.
+The default editor uses a signed-in Codex CLI with `gpt-6-astra` and its `image_gen.imagegen` tool. SAM3 and the
+camera calibration must be installed locally. `--editor api` uses `OPENAI_API_KEY` and the imagegen skill CLI.
 
 ```bash
-PYTHONPATH=. .venv/bin/python synth/valid_to_violation.py \
-  data/cam01/rtsp_samples/s_003.jpg \
-  --output work/out/s_003_violation.png \
-  --max-attempts 3
+python -m synth.catalogue_reference_map --image data/cam01/rtsp_samples/s_003.jpg --seed 3
+python -m synth.valid_to_violation data/cam01/rtsp_samples/s_003.jpg \
+  --reference-map work/catalogue3d/reference_maps/s_003/reference_map.json \
+  --output work/out/s_003_violation.png --max-attempts 3
 ```
 
-The downloaded catalogue in `work/new_reference_catalogue/reference` has
-selected individual object images in `work/new_reference_catalogue/selected`.
-To use them, add:
-
-```bash
---reference-map work/new_reference_catalogue/selected/reference_map.json
-```
-
-If the source edge is too occluded for SAM3, inspect the source and provide
-left-to-right endpoints in **source-image pixels**:
-
-```bash
-PYTHONPATH=. .venv/bin/python synth/valid_to_violation.py \
-  data/cam01/rtsp_samples/s_003.jpg \
-  --contact-edge 872,471,1033,477 \
-  --output work/out/s_003_violation.png
-```
-
-The override is recorded as a manual anchor; it does not assert that the full
-edge is visible. Existing final outputs are never overwritten. Exit code `2`
-means the sheet or cargo stage exhausted its attempts, with no final image.
-`--joint` retains the old one-step workflow and its `--resume` option;
-`--legacy-staged` retains the earlier Astra-landmark two-stage workflow.
+If the source edge is too occluded, give left-to-right endpoints of the top-face edge in source-image pixels with
+`--contact-edge 872,471,1033,477` (pass the same edge to `catalogue_reference_map` so its views match).
+Existing final outputs are never overwritten. Exit code `2` means the sheet or cargo stage exhausted its attempts,
+with no final image. `--reuse-sheet` / `--reuse-cargo` re-verify earlier candidates.
 
 ## Verification limits
 
-SAM3 can miss a dark, thin LSP or combine touching sheets into one mask. In
-those cases the numeric gate fails and the report shows the mask measurements.
-MoGe supplies an estimated source point map, while the fixed cam01 calibration
-sets the target sheet size (1.9 × 1.85 m); neither model proves hidden edges.
-The SKID crops in Step A are fragments and are used only as preservation
-references. No SKID is added.
+SAM3 can miss a dark, thin LSP or merge touching sheets into one mask; the numeric gate then fails and the report
+shows the measurements. The calibration sets the target sheet size; it cannot prove edges hidden behind the cargo.
+Astra's scores are a model's judgement on a close-up, so the hard checks above are all done by code.

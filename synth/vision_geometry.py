@@ -1,4 +1,4 @@
-"""SAM3/MoGe measurements for editing one valid cam01 frame.
+"""SAM3/MoGe measurements for editing one valid CCTV frame.
 
 The calibrated polygon is the geometric target. A hidden source edge is
 inferred from calibration and tagged as such; it is never described as visible.
@@ -7,7 +7,6 @@ inferred from calibration and tagged as such; it is never described as visible.
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +19,7 @@ PROMPTS = {
     "cargo": ("stretch wrapped cargo", "box"),
     "floor": ("floor",),
 }
+GUIDE_COLOURS = ((0, 255, 70), (255, 170, 0))   # line colours of the geometry guide image
 
 
 def union(masks: list[np.ndarray], shape: tuple[int, int]) -> np.ndarray:
@@ -61,12 +61,19 @@ class Sam3Masks:
                     for module in self.processor.model.modules():
                         if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
                             module.register_forward_pre_hook(match_weight_dtype)
-            with Image.open(image_path) as image:
+            import contextlib
+            import torch
+            # On CUDA the SAM3 checkpoint runs in bfloat16 autocast (as synth.segment does); without it the
+            # backbone mixes bf16 activations with fp32 weights and fails.
+            autocast = (torch.autocast("cuda", dtype=torch.bfloat16) if self.processor.device == "cuda"
+                        else contextlib.nullcontext())
+            with autocast, Image.open(image_path) as image:
                 state = self.processor.set_image(image.convert("RGB"))
             for key in missing:
                 masks: list[np.ndarray] = []
                 for prompt in PROMPTS[key]:
-                    output = self.processor.set_text_prompt(state=state, prompt=prompt)
+                    with autocast:
+                        output = self.processor.set_text_prompt(state=state, prompt=prompt)
                     for mask, score in zip(output["masks"], output["scores"]):
                         if float(score) < 0.5:
                             continue
@@ -80,8 +87,87 @@ class Sam3Masks:
         return result
 
 
-def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int]) -> tuple[list[list[int]], dict]:
-    """Find the central loaded LSP by cargo overlap and its exposed front rim."""
+def _fit_line(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    centre = points.mean(0)
+    _, _, vt = np.linalg.svd(points - centre)
+    direction = vt[0] if vt[0][0] >= 0 else -vt[0]
+    return centre, direction
+
+
+def top_face_edge(mask: np.ndarray, gray: np.ndarray, max_angle_deg: float = 40,
+                  max_side_px: float = 15) -> tuple[list[list[int]], dict] | None:
+    """Front edge of the LSP's TOP face, measured on the photo.
+
+    The lowest row of a SAM3 sheet mask is where the 9 cm side face meets the floor, but the geometry guide
+    projects at the top-face height, so the edge must be the top-face edge. OpenCV's line segment detector finds
+    segments on the lower outline of the mask (within max_angle_deg of horizontal, so slanted sheets work); when
+    two parallel lines a few pixels apart are found (top-face edge above, floor contact below) the upper one is
+    kept. Endpoints are the mask's extent along that line. Returns None when no edge is measurable."""
+    import cv2
+    from scipy.ndimage import binary_erosion, distance_transform_edt
+
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 50:
+        return None
+    x0, x1, y0, y1 = int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1
+    band_top = y1 - max(12, int(.35 * (y1 - y0)))          # lower part of the sheet only
+    near = distance_transform_edt(~(mask & ~binary_erosion(mask))) <= 6
+    has = mask.any(axis=0)
+    lowest = np.where(has, mask.shape[0] - 1 - np.argmax(mask[::-1], axis=0), -1)   # lowest mask row per column
+    pad = 8
+    cx0, cy0 = max(0, x0 - pad), max(0, band_top - pad)
+    crop = gray[cy0:min(gray.shape[0], y1 + pad), cx0:min(gray.shape[1], x1 + pad)]
+    found = cv2.createLineSegmentDetector().detect(np.ascontiguousarray(crop, dtype=np.uint8))[0]
+    if found is None:
+        return None
+    points = []
+    for xa, ya, xb, yb in found.reshape(-1, 4) + [cx0, cy0, cx0, cy0]:
+        length = float(np.hypot(xb - xa, yb - ya))
+        angle = abs(np.degrees(np.arctan2(yb - ya, xb - xa))) % 180
+        if length < 12 or min(angle, 180 - angle) > max_angle_deg:
+            continue
+        mx, my = int(round((xa + xb) / 2)), int(round((ya + yb) / 2))
+        if my < band_top or not (0 <= my < mask.shape[0] and 0 <= mx < mask.shape[1]) or not near[my, mx]:
+            continue
+        if lowest[mx] < 0 or not 0 <= lowest[mx] - my <= max_side_px + 6:
+            continue   # not on the sheet's lower outline (e.g. where the cargo stands on the deck)
+        t = np.linspace(0, 1, max(2, int(length)))[:, None]
+        points.append(np.array([xa, ya]) + t * np.array([xb - xa, yb - ya]))   # one point per pixel = length weight
+    if not points or sum(len(p) for p in points) < 25:
+        return None
+    points = np.vstack(points)
+    centre, direction = _fit_line(points)
+    normal = np.array([-direction[1], direction[0]])
+    normal = normal if normal[1] >= 0 else -normal          # points down the image, towards the floor contact
+    offset = (points - centre) @ normal
+    split = None
+    if np.percentile(offset, 90) - np.percentile(offset, 10) > 4:
+        low, high = np.percentile(offset, 15), np.percentile(offset, 85)
+        upper = offset < (low + high) / 2
+        for _ in range(10):
+            upper = np.abs(offset - low) < np.abs(offset - high)
+            if upper.all() or not upper.any():
+                break
+            low, high = offset[upper].mean(), offset[~upper].mean()
+        if 20 <= upper.sum() < len(points) and 3 < high - low <= max_side_px:   # a side face, not another object
+            centre, direction = _fit_line(points[upper]); split = round(float(high - low), 1)
+    rel = np.c_[xs, ys] - centre
+    along = rel @ direction
+    across = np.abs(rel @ np.array([-direction[1], direction[0]]))
+    on_line = along[across <= 6]                            # mask pixels on the fitted line
+    if len(on_line) < 20:
+        return None
+    a, b = centre + on_line.min() * direction, centre + on_line.max() * direction
+    edge = [[int(round(a[0])), int(round(a[1]))], [int(round(b[0])), int(round(b[1]))]]
+    return edge, {"method": "lsd_top_face_edge", "edge_observed": True, "two_lines_px_apart": split,
+                  "edge_angle_deg": round(float(np.degrees(np.arctan2(direction[1], direction[0]))), 1),
+                  "lsd_points": int(len(points))}
+
+
+def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int],
+                gray: np.ndarray | None = None) -> tuple[list[list[int]], dict]:
+    """Find the central loaded LSP by cargo overlap and the front edge of its top face (top_face_edge, needs the
+    grey image); without it, or when no edge is measurable, the mask's lowest row (the floor contact)."""
     width, height = image_size
     cargo = []
     for mask in masks.get("cargo", []):
@@ -108,6 +194,11 @@ def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int])
     if not candidates:
         raise RuntimeError("SAM3 did not isolate the loaded source LSP; supply --contact-edge")
     _, mask, box = max(candidates, key=lambda item: item[0])
+    if gray is not None:
+        measured = top_face_edge(mask, gray)
+        if measured is not None:
+            edge, info = measured
+            return edge, {**info, "cargo_bbox": cargo_box, "lsp_bbox": box}
     ys = np.flatnonzero(mask.any(axis=1))
     rim = mask[max(int(ys[-1]) - 10, 0):int(ys[-1]) + 1]
     xx = np.flatnonzero(rim.any(axis=0))
@@ -174,22 +265,104 @@ def edit_region(size: tuple[int, int], polygon: list[list[int]], stage: str) -> 
     return mask.filter(ImageFilter.GaussianBlur(6))
 
 
+def colour_match(edited: np.ndarray, original: np.ndarray, sample: np.ndarray) -> np.ndarray:
+    """Per-channel gain/offset mapping the edit onto the original over `sample` pixels (the feathered ring of the
+    edit region), so a global exposure or colour shift of the image model leaves no visible frame. Gains are
+    limited to 0.8-1.25."""
+    if sample.sum() < 200:
+        return edited
+    out = edited.astype(np.float32)
+    for c in range(3):
+        e, o = out[..., c][sample], original[..., c][sample].astype(np.float32)
+        gain = float(np.clip(o.std() / max(float(e.std()), 1e-3), .8, 1.25))
+        out[..., c] = (out[..., c] - e.mean()) * gain + o.mean()
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def preserve_outside(base: Path, generated: Path, output: Path, region: Image.Image,
-                     protected: list[np.ndarray] | None = None) -> None:
+                     protected: list[np.ndarray] | None = None, feather_px: int = 2) -> None:
+    """Composite the edit into `base` inside `region` only, colour-matched to the base. Protected SAM3 objects keep
+    their exact pixels; the edit fades out over `feather_px` pixels around them instead of a hard cut."""
     with Image.open(base) as original, Image.open(generated) as edited:
-        original = original.convert("RGB")
-        edited = edited.convert("RGB").resize(original.size, Image.Resampling.LANCZOS)
-        alpha = np.asarray(region, dtype=np.uint8).copy()
-        for mask in protected or []:
-            if mask.shape != alpha.shape:
-                raise RuntimeError("Protected SAM3 mask dimensions differ from source")
-            alpha[mask] = 0
-        result = Image.composite(edited, original, Image.fromarray(alpha))
-        result.save(output)
+        o = np.asarray(original.convert("RGB"))
+        e = np.asarray(edited.convert("RGB").resize(original.size, Image.Resampling.LANCZOS))
+    alpha = np.asarray(region, dtype=np.float32) / 255
+    keep = np.zeros(alpha.shape, bool)
+    for mask in protected or []:
+        if mask.shape != alpha.shape:
+            raise RuntimeError("Protected SAM3 mask dimensions differ from source")
+        keep |= mask
+    if keep.any():
+        soft = np.asarray(Image.fromarray(keep.astype(np.uint8) * 255).filter(
+            ImageFilter.GaussianBlur(feather_px)), dtype=np.float32) / 255
+        alpha = alpha * (1 - np.clip(2 * soft, 0, 1))
+        alpha[keep] = 0
+    e = colour_match(e, o, (alpha > .05) & (alpha < .95) & ~keep)
+    result = np.round(e * alpha[..., None] + o * (1 - alpha[..., None])).astype(np.uint8)
+    result[alpha == 0] = o[alpha == 0]
+    Image.fromarray(result).save(output)
+
+
+def raw_drift(base: Path, raw: Path, region: Image.Image, protected: list[np.ndarray],
+              max_changed: float = .08, max_mean: float = 9.) -> dict:
+    """How much the image model changed what it had to keep (outside the edit region and on the protected
+    objects), measured on its RAW output, before the composite restores those pixels."""
+    with Image.open(base) as a, Image.open(raw) as b:
+        original = np.asarray(a.convert("RGB"), dtype=np.int16)
+        edited = np.asarray(b.convert("RGB").resize(a.size, Image.Resampling.LANCZOS), dtype=np.int16)
+    keep = np.asarray(region) == 0
+    for mask in protected:
+        keep = keep | mask
+    delta = np.abs(original - edited).mean(axis=2)[keep]
+    changed = float((delta > 30).mean()) if delta.size else 0.
+    mean = float(delta.mean()) if delta.size else 0.
+    failures = []
+    if changed > max_changed or mean > max_mean:
+        failures.append(f"the image model changed the scene it had to keep ({changed:.1%} pixels, mean RGB delta "
+                        f"{mean:.1f}); keep the forklift, the original LSP and cargo and the background unchanged")
+    return {"passed": not failures, "failures": failures, "changed_fraction": round(changed, 4),
+            "mean_rgb_delta": round(mean, 2)}
+
+
+def guide_marks(base: Path, candidate: Path, region: Image.Image, tolerance: int = 45, limit: int = 40) -> dict:
+    """Pixels in the geometry-guide line colours that the candidate has and the base had not: the image model
+    drew the guide into the photo."""
+    with Image.open(base) as a, Image.open(candidate) as b:
+        original = np.asarray(a.convert("RGB"), dtype=np.int16)
+        edited = np.asarray(b.convert("RGB").resize(a.size, Image.Resampling.LANCZOS), dtype=np.int16)
+    inside = np.asarray(region) > 0
+    count = 0
+    for colour in GUIDE_COLOURS:
+        target = np.array(colour, dtype=np.int16)
+        hits = lambda image: int(((np.abs(image - target) <= tolerance).all(axis=2) & inside).sum())
+        count += max(0, hits(edited) - hits(original))
+    failures = [] if count <= limit else [f"{count} pixels in the guide-line colours: do not draw the geometry guide"]
+    return {"passed": not failures, "failures": failures, "guide_coloured_pixels": count}
+
+
+def zoom_pair(before: Path, after: Path, polygon: list[list[int]], output: Path, height: int = 512) -> Path:
+    """Side-by-side close-up of the edit (before | after) for the visual review: at full frame the new object is
+    only a few hundred pixels wide and seams are invisible."""
+    xs, ys = [p[0] for p in polygon], [p[1] for p in polygon]
+    w, h = max(xs) - min(xs), max(ys) - min(ys)
+    box = (int(min(xs) - .6 * w), int(min(ys) - 1.6 * h), int(max(xs) + .6 * w), int(max(ys) + .5 * h))
+    tiles = []
+    for path in (before, after):
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            clip = (max(0, box[0]), max(0, box[1]), min(image.width, box[2]), min(image.height, box[3]))
+            tile = image.crop(clip)
+        tiles.append(tile.resize((max(1, round(tile.width * height / tile.height)), height), Image.Resampling.LANCZOS))
+    pair = Image.new("RGB", (tiles[0].width + tiles[1].width + 8, height), (255, 255, 255))
+    pair.paste(tiles[0], (0, 0))
+    pair.paste(tiles[1], (tiles[0].width + 8, 0))
+    pair.save(output)
+    return output
 
 
 def verify_unchanged(base: Path, candidate: Path, region: Image.Image,
                      protected: list[np.ndarray]) -> dict:
+    """Integrity check of the composite: pixels outside the region and on protected objects are the base's."""
     with Image.open(base) as a, Image.open(candidate) as b:
         original = np.asarray(a.convert("RGB"))
         edited = np.asarray(b.convert("RGB"))
@@ -205,6 +378,8 @@ def verify_unchanged(base: Path, candidate: Path, region: Image.Image,
 
 def verify_sheet_masks(source: dict[str, list[np.ndarray]], candidate: dict[str, list[np.ndarray]],
                        polygon: list[list[int]], size: tuple[int, int]) -> dict:
+    """One new LSP that fills the target polygon (coverage, IoU), spans the whole shared edge (the polygon's first
+    two points) and does not spill out of it; no cargo yet."""
     target = polygon_mask(size, polygon)
     source_lsp = union(source.get("LSP", []), target.shape)
     # SAM3 can give different masks for unrelated parked LSPs even when their
@@ -215,12 +390,27 @@ def verify_sheet_masks(source: dict[str, list[np.ndarray]], candidate: dict[str,
     added = union(new_instances, target.shape) & ~source_lsp
     coverage = float((added & target).sum() / max(target.sum(), 1))
     outside = float((added & ~target).sum() / max(added.sum(), 1))
+    iou = float((added & target).sum() / max((added | target).sum(), 1))
+    # The target strip along the shared edge must be covered end to end: a narrower or sideways-shifted sheet
+    # leaves part of it empty.
+    shared = np.asarray(polygon[:2], dtype=float)
+    depth = max(float(np.linalg.norm(np.asarray(polygon[2], dtype=float) - shared[1])), 1.)
+    d = shared[1] - shared[0]
+    n = np.array([-d[1], d[0]]) / max(float(np.linalg.norm(d)), 1e-6)
+    yy, xx = np.mgrid[0:target.shape[0], 0:target.shape[1]]
+    strip = target & (np.abs((xx - shared[0][0]) * n[0] + (yy - shared[0][1]) * n[1]) <= .2 * depth)
+    shared_cover = float((added & strip).sum() / max(strip.sum(), 1))
     # A thin dark side wall may extend beyond the projected top polygon.
     failures = []
-    if coverage < 0.45:
-        failures.append(f"SAM3 new LSP covers {coverage:.1%} of target; need >=45%")
-    if outside > 0.25:
-        failures.append(f"SAM3 new LSP outside target {outside:.1%}; need <=25%")
+    if coverage < 0.6:
+        failures.append(f"SAM3 new LSP covers {coverage:.1%} of target; need >=60%")
+    if outside > 0.2:
+        failures.append(f"SAM3 new LSP outside target {outside:.1%}; need <=20%")
+    if iou < 0.5:
+        failures.append(f"SAM3 new LSP overlaps the target with IoU {iou:.2f}; need >=0.50")
+    if shared_cover < 0.85:   # the empty sheet is unoccluded: it must reach both ends of the shared edge
+        failures.append(f"new LSP covers {shared_cover:.1%} of the shared edge strip; it must span the original "
+                        "sheet's full width")
     if added.sum() < 2500:
         failures.append("SAM3 found too little new LSP area")
     if len(new_instances) != 1:
@@ -231,8 +421,8 @@ def verify_sheet_masks(source: dict[str, list[np.ndarray]], candidate: dict[str,
     new_cargo = edited_cargo & ~source_cargo
     if (new_cargo & target).sum() > 1000:
         failures.append("Cargo appeared before the cargo stage")
-    return {"passed": not failures, "failures": failures, "coverage": coverage,
-            "outside_fraction": outside, "added_lsp_pixels": int(added.sum())}
+    return {"passed": not failures, "failures": failures, "coverage": coverage, "iou": iou,
+            "shared_edge_cover": shared_cover, "outside_fraction": outside, "added_lsp_pixels": int(added.sum())}
 
 
 def verify_cargo_masks(sheet: dict[str, list[np.ndarray]], candidate: dict[str, list[np.ndarray]],
