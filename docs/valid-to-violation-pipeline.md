@@ -34,7 +34,11 @@ or from `--reference-map` (recommended: `synth.catalogue_reference_map`, view-ma
    exposed deck. Only a passing image is published.
 
 References are **appearance only**: every prompt says so, and sizes and positions come from the geometry above.
-All masks, geometry, close-ups, scores and candidate paths are in `work/out/<output-stem>_vision_*/report.json`.
+Every run, accepted or not, writes `work/out/<output-stem>_summary.png`: the input on the left, the output (or the
+last candidate, marked NOT ACCEPTED) on the right, and below them the result, the model calls by purpose (image edits
+and visual reviews per stage), the attempts per stage, the last realism scores and failures, the references and the
+run time. All masks, geometry, close-ups, scores and candidate paths are in
+`work/out/<output-stem>_vision_*/report.json` (`calls` counts the model calls).
 SAM3 masks are cached by input hash under `work/vision_cache`. `--moge` adds a MoGe floor-plane diagnostic to the
 report (not a gate).
 

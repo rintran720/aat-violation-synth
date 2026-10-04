@@ -150,6 +150,12 @@ class ValidToViolationTests(unittest.TestCase):
             self.assertIn("appearance only", calls[0][2])
             self.assertTrue((Path(folder) / "work/out").glob("final_vision_*/sheet_zoom_01.png"))
             self.assertTrue(report["stages"]["sheet"][0]["checks"]["composite"]["passed"])
+            self.assertEqual(report["calls"], {"image edit - add empty LSP (Astra + imagegen)": 1,
+                                               "visual review - LSP realism (Astra)": 1,
+                                               "image edit - add cargo (Astra + imagegen)": 1,
+                                               "visual review - cargo realism (Astra)": 1})
+            with Image.open(report["summary_image"]) as summary:   # input | output side by side, stats below
+                self.assertGreater(summary.width, 2 * 120)
 
     def test_low_realism_score_stops_without_publishing(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -158,6 +164,7 @@ class ValidToViolationTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertFalse(output.exists())
             self.assertEqual(report["stopped_at"], "sheet_geometry_or_realism")
+            self.assertTrue(Path(report["summary_image"]).is_file())   # a failed run still gets its summary
 
     def test_raw_drift_fails_even_though_the_composite_restores_pixels(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

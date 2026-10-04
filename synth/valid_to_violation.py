@@ -14,6 +14,9 @@ Two edits on the real frame, each gated by code before a visual review:
 References (forklift, LSP, SKID, cargo) are appearance only; by default Step A crops (work/refs/index.json),
 or a --reference-map, e.g. from synth.catalogue_reference_map (view-matched renders of the 3D catalogue). When the
 map gives the cargo's size_m, the cargo's target box is the projection of that 3D box. A failed gate never publishes.
+Every run, accepted or not, also writes <output stem>_summary.png next to the output: the input on the left, the
+output (or the last candidate) on the right, and the run statistics in English below (model calls by purpose,
+attempts per stage, result, last scores and failures).
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -355,6 +359,85 @@ def gate(stage: str, base: Path, raw: Path | None, candidate: Path, region, prot
     return {"checks": checks, "aesthetic": review, "failures": failures + visual_failures, "accepted": passed}
 
 
+def summary_sheet(report: dict, path: Path, panel_height: int = 540) -> Path:
+    """One image per run: the source on the left, the output on the right (the published image, else the last
+    candidate, marked NOT ACCEPTED), and below them the run statistics in English: model calls by purpose,
+    attempts per stage, the result and the last failures."""
+    from PIL import ImageFont
+
+    def font(size: int, bold: bool = False):
+        for name in (("arialbd.ttf", "DejaVuSans-Bold.ttf") if bold else ("arial.ttf", "DejaVuSans.ttf")):
+            try:
+                return ImageFont.truetype(name, size)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    def panel(image_path: str | None, title: str) -> Image.Image:
+        if image_path and Path(image_path).is_file():
+            with Image.open(image_path) as image:
+                tile = image.convert("RGB")
+            tile = tile.resize((round(tile.width * panel_height / tile.height), panel_height), Image.Resampling.LANCZOS)
+        else:
+            tile = Image.new("RGB", (round(panel_height * 16 / 9), panel_height), (40, 40, 40))
+            ImageDraw.Draw(tile).text((20, panel_height // 2), "no output image", font=font(28), fill=(220, 220, 220))
+        out = Image.new("RGB", (tile.width, tile.height + 40), (255, 255, 255))
+        out.paste(tile, (0, 40))
+        ImageDraw.Draw(out).text((10, 8), title, font=font(24, True), fill=(20, 20, 20))
+        return out
+
+    stages = report.get("stages", {})
+    last = None
+    for stage in ("cargo", "sheet"):
+        if stages.get(stage):
+            last = stages[stage][-1]
+            break
+    accepted = bool(report.get("accepted"))
+    right_path = report.get("output") if accepted else (last or {}).get("candidate")
+    left = panel(report.get("input"), "Input (valid frame)")
+    right = panel(right_path, "Output (violation)" if accepted else "Last candidate - NOT ACCEPTED")
+    calls = report.get("calls", {})
+    lines = [("Result: " + ("ACCEPTED" if accepted else f"NOT ACCEPTED (stopped at {report.get('stopped_at', 'error')})"),
+              (20, 130, 60) if accepted else (190, 30, 30), True)]
+    if report.get("error"):
+        lines.append((f"Error: {report['error']}"[:160], (190, 30, 30), False))
+    lines.append((f"Model calls: {sum(calls.values())} in total", (20, 20, 20), True))
+    lines += [(f"  {purpose}: {n}", (20, 20, 20), False) for purpose, n in calls.items()]
+    for stage, name in (("sheet", "Stage 1 - empty LSP"), ("cargo", "Stage 2 - cargo")):
+        runs = stages.get(stage) or []
+        if not runs:
+            continue
+        passed = sum(bool(r.get("accepted")) for r in runs)
+        lines.append((f"{name}: {len(runs)} attempt(s), {passed} accepted", (20, 20, 20), True))
+        scores = (runs[-1].get("aesthetic") or {}).get("scores") or {}
+        if scores:
+            lines.append(("  last realism scores: " + ", ".join(f"{k} {v}/5" for k, v in scores.items()), (20, 20, 20), False))
+        for failure in (runs[-1].get("failures") or [])[:3]:
+            lines.append((f"  last failure: {failure}"[:150], (150, 70, 0), False))
+    refs = report.get("reference_map") or "Step A crops"
+    lines.append((f"References: {refs}"[:150], (90, 90, 90), False))
+    if report.get("started_at") and report.get("finished_at"):
+        lines.append((f"Run time: {report['finished_at'] - report['started_at']:.0f} s"
+                      f"   Editor: {report.get('editor')}   Input: {Path(report['input']).name}", (90, 90, 90), False))
+    width = left.width + right.width + 20
+    text_h = 30 + 30 * len(lines)
+    sheet = Image.new("RGB", (width, left.height + text_h), (255, 255, 255))
+    sheet.paste(left, (0, 0))
+    sheet.paste(right, (left.width + 20, 0))
+    draw = ImageDraw.Draw(sheet)
+    y = left.height + 15
+    for text, colour, bold in lines:
+        draw.text((14, y), text, font=font(22, bold), fill=colour)
+        y += 30
+    sheet.save(path)
+    return path
+
+
+def count_call(report: dict, purpose: str) -> None:
+    report.setdefault("calls", {})
+    report["calls"][purpose] = report["calls"].get(purpose, 0) + 1
+
+
 def main() -> int:
     args = parse_args()
     os.environ.setdefault("HF_HOME", str(ROOT / "work/huggingface"))
@@ -382,7 +465,9 @@ def main() -> int:
               "step_a_index": str(args.step_a_index.resolve()),
               "reference_map": str(args.reference_map.resolve()) if getattr(args, "reference_map", None) else None,
               "references": {key: str(value) for key, value in refs.items()},
-              "editor": args.editor, "stages": {"sheet": [], "cargo": []}, "accepted": False}
+              "editor": args.editor, "stages": {"sheet": [], "cargo": []}, "accepted": False,
+              "calls": {}, "started_at": time.time()}
+    editor_name = "Astra + imagegen" if args.editor == "codex" else f"API {args.model}"
 
     def save_report() -> None:
         report_path.write_text(json.dumps(report, indent=2))
@@ -440,6 +525,7 @@ def main() -> int:
                           "Keep the original forklift, cargo and LSP intact. Coloured guide marks must not appear in "
                           f"the photograph. Target LSP top corners in source pixels: {polygon}. The shared rear edge "
                           f"is {edge}; the new sheet spans its full width. " + APPEARANCE_ONLY + " " + feedback)
+                count_call(report, f"image edit - add empty LSP ({editor_name})")
                 guided_edit(args, [source, refs["forklift"], refs["LSP"], refs["SKID"], guide],
                             ["Image 1 original valid source", f"Image 2 {ref_name} forklift appearance",
                              f"Image 3 {ref_name} LSP appearance", f"Image 4 {ref_name} SKID preservation reference",
@@ -447,6 +533,7 @@ def main() -> int:
                 preserve_outside(source, raw, candidate, sheet_region, protected)
             candidate_masks = segmenter.get(candidate, ("LSP", "cargo"))
             measured = verify_sheet_masks(source_masks, candidate_masks, polygon, size)
+            count_call(report, "visual review - LSP realism (Astra)")
             result = gate("sheet", source, raw, candidate, sheet_region, protected, measured, source, polygon,
                           refs["LSP"], args, work, attempt, "adding one empty LSP")
             report["stages"]["sheet"].append({"number": attempt, "candidate": str(candidate), **result})
@@ -509,6 +596,7 @@ def main() -> int:
                           "load behind it. Render a single coherent cargo surface without a triangular patch or dark "
                           "strip at its bottom. Do not move either LSP, the forklift or the background. Geometry guide "
                           f"polygon: {polygon}. " + APPEARANCE_ONLY + " " + feedback)
+                count_call(report, f"image edit - add cargo ({editor_name})")
                 guided_edit(args, [accepted_sheet, source, refs["LSP"], refs["cargo"], guide],
                             ["Image 1 geometry-accepted empty LSP", "Image 2 original valid source",
                              f"Image 3 {ref_name} LSP appearance", f"Image 4 {ref_name} cargo appearance",
@@ -516,6 +604,7 @@ def main() -> int:
                 preserve_outside(accepted_sheet, raw, candidate, cargo_region, cargo_protected)
             candidate_masks = segmenter.get(candidate, ("LSP", "cargo"))
             measured = verify_cargo_masks(sheet_masks, candidate_masks, polygon, size, min_height_px=min_height)
+            count_call(report, "visual review - cargo realism (Astra)")
             result = gate("cargo", accepted_sheet, raw, candidate, cargo_region, cargo_protected, measured, source,
                           polygon, refs["cargo"], args, work, attempt, "adding one cargo on the new LSP")
             report["stages"]["cargo"].append({"number": attempt, "candidate": str(candidate), **result})
@@ -530,7 +619,15 @@ def main() -> int:
             feedback = "Fix these failures: " + "; ".join(result["failures"])
         report["stopped_at"] = "cargo_support_or_realism"
         return 2
+    except Exception as error:
+        report["error"] = str(error)
+        raise
     finally:
+        report["finished_at"] = time.time()
+        # one picture per run: input | output, with the run statistics underneath
+        summary = summary_sheet(report, work / "summary.png")
+        report["summary_image"] = str(output.with_name(f"{output.stem}_summary.png"))
+        shutil.copyfile(summary, report["summary_image"])
         save_report()
 
 
