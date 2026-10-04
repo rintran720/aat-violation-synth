@@ -13,7 +13,7 @@ from synth.composite_violation import composite
 
 
 def render_one(config: dict, blender: str, scenario: str, count: int, stem: str,
-               samples: int, reuse_render: bool = False) -> Path:
+               samples: int, reuse_render: bool = False, red_u_light: bool = True) -> Path:
     work = Path(config["work_dir"])
     command = [
         blender, "--background", "--threads", "4", "--python-exit-code", "1",
@@ -21,6 +21,8 @@ def render_one(config: dict, blender: str, scenario: str, count: int, stem: str,
         "--scenario", scenario, "--lsp-count", str(count),
         "--output-stem", stem, "--samples", str(samples),
     ]
+    if not red_u_light:
+        command.append("--no-red-u-light")
     rgba_path = work / "renders" / f"{stem}.png"
     if not reuse_render or not rgba_path.exists():
         subprocess.run(command, check=True)
@@ -95,21 +97,34 @@ def main() -> None:
     parser.add_argument("--samples", type=int, default=16)
     parser.add_argument("--reuse-renders", action="store_true",
                         help="Composite existing Blender PNGs instead of rendering the scenes again")
+    parser.add_argument("--ab-red-u", action="store_true",
+                        help="Create a 2x2 A/B JPG comparing both violation counts with and without the red U light")
     parser.add_argument("--output", default="work/out/clean_background_three_scenes_preview.jpg")
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
-    cases = [
-        ("VALID · 1 LSP", "N1", 1, "clean_bg_valid_1lsp"),
-        ("VIOLATION · 2 LSPs", "V1", 2, "clean_bg_violation_2lsp"),
-        ("VIOLATION · 3 LSPs", "V2", 3, "clean_bg_violation_3lsp"),
-    ]
     background = Path(config["background_image"])
-    outputs: list[tuple[str, Path]] = [("CLEAN BACKGROUND", background)]
-    for label, scenario, count, stem in cases:
+    if args.ab_red_u:
+        cases = [
+            ("2 LSP · WITH RED U", "V1", 2, "clean_bg_violation_2lsp", True),
+            ("2 LSP · NO RED U", "V1", 2, "clean_bg_violation_2lsp_no_u", False),
+            ("3 LSP · WITH RED U", "V2", 3, "clean_bg_violation_3lsp", True),
+            ("3 LSP · NO RED U", "V2", 3, "clean_bg_violation_3lsp_no_u", False),
+        ]
+        outputs = []
+    else:
+        cases = [
+            ("VALID · 1 LSP", "N1", 1, "clean_bg_valid_1lsp", True),
+            ("VIOLATION · 2 LSPs", "V1", 2, "clean_bg_violation_2lsp", True),
+            ("VIOLATION · 3 LSPs", "V2", 3, "clean_bg_violation_3lsp", True),
+        ]
+        outputs = [("CLEAN BACKGROUND", background)]
+    for label, scenario, count, stem, red_u_light in cases:
         output = render_one(config, args.blender, scenario, count, stem, args.samples,
-                            reuse_render=args.reuse_renders)
+                            reuse_render=args.reuse_renders, red_u_light=red_u_light)
         outputs.append((label, output))
     destination = Path(args.output)
+    if args.ab_red_u and args.output == "work/out/clean_background_three_scenes_preview.jpg":
+        destination = Path("work/out/violation_red_u_ab_preview.jpg")
     make_contact_sheet(outputs, destination)
     print(json.dumps({"preview": str(destination), "panels": [label for label, _ in outputs]}, indent=2))
 

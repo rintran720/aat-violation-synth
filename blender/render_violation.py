@@ -144,7 +144,7 @@ def add_red_u_light(forklift_transform,settings):
     return objects,corners
 
 
-def main(config_path,scenario='V1',lsp_count=2,arrangement='in_series',output_stem='v_000',samples=64):
+def main(config_path,scenario='V1',lsp_count=2,arrangement='in_series',output_stem='v_000',samples=64,red_u_light=True):
     cfg=json.loads(Path(config_path).read_text());work=Path(cfg['work_dir']).resolve()
     camera_cfg=json.loads((work/'camera.json').read_text())
     facts=json.loads((work/'scene_facts.json').read_text())
@@ -266,13 +266,14 @@ def main(config_path,scenario='V1',lsp_count=2,arrangement='in_series',output_st
         location=list(base),rot_z_deg=heading,bbox_2d=projected_bbox(scene,camera,operator_corners,W,H),
         mask_color_rgb=[255,64,64],appearance={'shirt':'dark short-sleeve matching rtsp_010 driver crop'})))
     all_corners.extend(operator_corners)
-    red_settings=cfg['red_u_light']
-    u_objects,u_corners=add_red_u_light(forklift_transform,red_settings)
-    actors.append((u_objects,dict(name='red_u_safety_light',**{'class':'safety_light'},asset='sample_matched_emissive_floor_curve',
-        location=list(base),rot_z_deg=heading,bbox_2d=projected_bbox(scene,camera,u_corners,W,H),
-        mask_color_rgb=[255,128,64],appearance={'shape':'square-cornered U open toward the forks',**red_settings,
-        'source':'flat emissive floor strips (projected line light)','camera_occlusion':'depth-tested against scene geometry'})))
-    all_corners.extend(u_corners)
+    if red_u_light:
+        red_settings=cfg['red_u_light']
+        u_objects,u_corners=add_red_u_light(forklift_transform,red_settings)
+        actors.append((u_objects,dict(name='red_u_safety_light',**{'class':'safety_light'},asset='sample_matched_emissive_floor_curve',
+            location=list(base),rot_z_deg=heading,bbox_2d=projected_bbox(scene,camera,u_corners,W,H),
+            mask_color_rgb=[255,128,64],appearance={'shape':'square-cornered U open toward the forks',**red_settings,
+            'source':'flat emissive floor strips (projected line light)','camera_occlusion':'depth-tested against scene geometry'})))
+        all_corners.extend(u_corners)
     meta=dict(image=f'{output_stem}.jpg',lossless_image=f'{output_stem}.png',camera_id=cfg['camera_id'],source_image=cfg['background_image'],
               violation_id=scenario,arrangement=arrangement,heading_deg=heading,lsp_count=lsp_count,
               is_violation=lsp_count>=2,skid_count=0,
@@ -342,5 +343,6 @@ if __name__=='__main__':
     parser.add_argument('--arrangement',choices=['in_series','staggered'],default='in_series')
     parser.add_argument('--output-stem',default='v_000')
     parser.add_argument('--samples',type=int,default=64)
+    parser.add_argument('--no-red-u-light',action='store_true',help='Render without the red U-shaped safety light')
     args=parser.parse_args(sys.argv[sys.argv.index('--')+1:])
-    main(args.config,args.scenario,args.lsp_count,args.arrangement,args.output_stem,args.samples)
+    main(args.config,args.scenario,args.lsp_count,args.arrangement,args.output_stem,args.samples,not args.no_red_u_light)
