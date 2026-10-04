@@ -1,7 +1,7 @@
 """Stage A1: multi-camera object sample library from recorded videos.
 
 Run: python -m synth.sample_library --videos data/multicam/video/*.mp4 --every 3
-Writes work/library/<class>/<camera>_<t>s_<k>.png (RGBA crop, alpha = SAM3 mask), work/library/index.json and
+Writes work/library/<class>/<camera>_<video time>_<t>s_<k>.png (RGBA crop, alpha = SAM3 mask), work/library/index.json and
 work/library/<class>_top.jpg contact sheets. Instances of one class that keep the same box in one camera
 (a parked object seen in many frames) are merged and only the best-quality crop is kept.
 """
@@ -118,13 +118,14 @@ def main():
     skid_filter = json.loads(Path("config.json").read_text()).get("sam3_filters", {}).get("SKID")
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     kept = {}        # (camera, class) -> list of records
-    cameras = {}
+    cameras, floor_by_cam = {}, {}
     videos = [v for pattern in args.videos for v in sorted(glob.glob(pattern))]
     for video in videos:
         cam = Path(video).stem.split("_")[0]
+        stamp = "_".join(Path(video).stem.split("_")[1:])   # several recordings per camera must not share crop names
         with tempfile.TemporaryDirectory() as tmp:
             frames = extract_frames(video, args.every, Path(tmp))
-            floor_rgb = []
+            floor_rgb = floor_by_cam.setdefault(cam, [])
             for idx, frame in enumerate(frames):
                 t = round((idx + .5) * args.every, 1)  # ffmpeg fps=1/N picks the frame in the middle of each N-s slot
                 image = Image.open(frame).convert("RGB"); pixels = np.asarray(image)
@@ -151,13 +152,15 @@ def main():
                             rec["seen"] = 1
                         x0, y0, x1, y1 = box
                         crop = np.dstack([pixels[y0:y1, x0:x1], m[y0:y1, x0:x1].astype(np.uint8) * 255])
-                        name = out / cls / f"{cam}_{t:06.1f}s_{k}.png"; name.parent.mkdir(parents=True, exist_ok=True)
+                        name = out / cls / f"{cam}_{stamp}_{t:06.1f}s_{k}.png"; name.parent.mkdir(parents=True, exist_ok=True)
                         Image.fromarray(crop, "RGBA").save(name); rec["crop"] = name.as_posix(); group.append(rec)
                 # floor colour of this frame: lower half of the image outside every object mask
                 lower = np.zeros_like(occupied); lower[gray.shape[0] // 2:] = True
                 floor_rgb.append(np.median(pixels[lower & ~occupied], axis=0))
                 print(f"{cam} {t:6.1f}s: {sum(len(v) for (c, _), v in kept.items() if c == cam)} kept", flush=True)
-            cameras[cam] = {"video": Path(video).name, "frames": len(frames),
+            prev = cameras.get(cam, {"videos": [], "frames": 0})
+            cameras[cam] = {"video": (prev["videos"] + [Path(video).name])[0],    # first recording (camera_setup reads it)
+                            "videos": prev["videos"] + [Path(video).name], "frames": prev["frames"] + len(frames),
                             "floor_rgb_median": np.median(floor_rgb, axis=0).round(1).tolist()}
     records = [r for group in kept.values() for r in group]
     if args.append:

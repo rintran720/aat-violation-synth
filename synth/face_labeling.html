@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Face Labelling</title>
+<style>
+  :root { --bg:#1b1f23; --panel:#262c32; --text:#e8edf1; --muted:#9aa7b1; --ok:#5fd38d; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px system-ui, sans-serif; }
+  header { padding:8px 16px; background:var(--panel); display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0 8px 0 0; }
+  main { display:grid; grid-template-columns: 270px 1fr 320px; height:calc(100vh - 92px); }
+  #list { overflow:auto; border-right:1px solid #333; }
+  #list .grp { padding:6px 10px; color:var(--muted); font-weight:600; background:#20252a; position:sticky; top:0; }
+  #list .grp small { display:block; font-weight:400; color:#c9d3da; }
+  #list .it { padding:5px 10px; cursor:pointer; display:flex; justify-content:space-between; }
+  #list .it.sel { background:#36414b; }
+  #list .n { color:var(--ok); }
+  #stage { overflow:auto; display:flex; align-items:flex-start; justify-content:center; padding:10px; }
+  canvas { cursor:crosshair; image-rendering:pixelated; }
+  #stage { justify-content:flex-start !important; }
+  aside { border-left:1px solid #333; padding:12px; overflow:auto; }
+  select, button { font:inherit; padding:5px 8px; background:#33404a; color:var(--text); border:1px solid #4a5965; border-radius:5px; }
+  button.primary { background:#2d6a4f; border-color:#3f8f6b; }
+  .facebtn.on { outline:2px solid #fff; }
+  .obj { padding:6px 8px; margin:8px 0; background:#20252a; border-radius:5px; }
+  .obj .row { display:flex; justify-content:space-between; align-items:center; margin:3px 0; }
+  .help { color:var(--muted); line-height:1.5; }
+  .vi { background:#20252a; border-left:3px solid var(--ok); padding:8px 10px; margin-bottom:10px; line-height:1.5; }
+  .vi b { color:var(--ok); }
+  details.vi summary { cursor:pointer; }
+  .obj .head { display:flex; gap:6px; align-items:center; margin-bottom:4px; }
+  .obj .head select { flex:1; min-width:0; }
+  @media (max-width: 800px) { main { grid-template-columns:1fr; height:auto; } #list { max-height:200px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Face labelling</h1>
+  <label>Object <select id="obj"></select></label>
+  <button id="newobj">+ New object (N)</button>
+  <label>Kind <select id="kind"></select></label>
+  <span>Face:</span>
+  <button class="facebtn" data-face="top">Top (1)</button>
+  <button class="facebtn" data-face="front">Front (2)</button>
+  <button class="facebtn" data-face="right">Right (3)</button>
+  <span>Zoom:</span><button id="zout">−</button><span id="zval">100%</span><button id="zin">+</button><button id="zfit">Fit (F)</button>
+  <button id="close">Close face (Enter)</button>
+  <button id="undo">Undo point (Z)</button>
+  <button class="primary" id="save">Save faces.json</button>
+  <button id="loadbtn">Load faces.json</button><input type="file" id="load" accept=".json,application/json" hidden>
+  <span id="count" class="help"></span>
+</header>
+<main>
+  <div id="list"></div>
+  <div id="stage"><canvas id="cv"></canvas></div>
+  <aside>
+    <div id="grpvi" class="vi"></div>
+    <details class="vi" id="howto"><summary><b>Cách gán</b> (bấm để ẩn / hiện)</summary>
+      1. Chọn <b>Object</b> (một kiện / một tấm / một chồng thật trên ảnh). Đối tượng khác thì bấm <b>+ New object</b>.<br>
+      2. Chọn <b>Kind</b> (loại đối tượng) nếu khác nhóm ảnh, ví dụ ảnh SKID có hàng: kiện là cargo, SKID là skid.<br>
+      3. Chọn mặt <b>Top</b> (nóc, nhìn từ trên), <b>Front</b> (mặt đứng bên trái góc nhìn) hoặc <b>Right</b> (mặt đứng bên phải),
+         rồi click đường viền của đúng mặt đó: từ 4 điểm trở lên, kết thúc bằng Enter / Close face / click lại điểm đầu.<br>
+      Một ảnh (và một object) có thể có nhiều Top / Front / Right; mặt đang chọn được giữ nguyên sau khi vẽ xong. Mặt sau và mặt trái của model sẽ dùng lại Front và Right.
+      Với chồng LSP / SKID: KHÔNG vẽ cả chồng (chồng được tạo bằng cách xếp các tấm đơn). Chỉ vẽ mặt của MỘT tấm / MỘT chiếc: Top = nóc tấm trên cùng, Front/Right = mép đứng của một tấm (dải mỏng), Kind = lsp_single / skid_single.<br>
+      Zoom: lăn chuột trên ảnh (zoom quanh con trỏ), +/−, F vừa khung; kéo thanh cuộn để di chuyển.<br>
+      Phím: ←/→ ảnh, N object mới, 1/2/3 mặt, Z xoá điểm, Enter đóng mặt.</details>
+    <h3>Objects on this image</h3>
+    <div id="objs"></div>
+  </aside>
+</main>
+<script>
+const DATA = /*DATA*/[];
+const KINDS = /*KINDS*/{};
+const GROUP_VI = /*GROUP_VI*/{};
+const LEGACY = /*LEGACY*/{};
+const KEY = 'face-labels-v2';
+const SINGLE = { lsp_stack: 'lsp_single', skid_stack: 'skid_single' };   // stacks are no longer labelled as a whole
+const COLORS = { top: '#5fd38d', front: '#ffb347', right: '#6ec6ff' };
+const FACE_VI = { top: 'nóc', front: 'trước', right: 'phải' };
+let labels = {}; try { labels = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) {}
+Object.values(labels).forEach(fs => fs.forEach(f => { f.kind = SINGLE[f.kind] || f.kind; }));
+// first labelling round (one texture name per face) -> object 1 of this image
+try {
+  const old = JSON.parse(localStorage.getItem('face-labels-v1') || '{}');
+  Object.entries(old).forEach(([im, fs]) => fs.forEach(f => addLegacy(im, f.texture, f.quad)));
+  localStorage.removeItem('face-labels-v1'); persist();
+} catch (e) {}
+let cur = 0, pts = [], img = new Image(), scale = 1, face = 'top', objNo = 1;
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const kindSel = document.getElementById('kind'), objSel = document.getElementById('obj');
+Object.entries(KINDS).forEach(([k, v]) => kindSel.add(new Option(`${k} — ${v}`, k)));
+
+function persist() { try { localStorage.setItem(KEY, JSON.stringify(labels)); } catch (e) {} }
+function addLegacy(im, texture, quad) {
+  const m = LEGACY[String(texture).replace(/^pallet_/, 'skid_')]; if (!m) return false;
+  const list = labels[im] = labels[im] || [];
+  if (list.some(f => f.face === m[1] && JSON.stringify(f.quad) === JSON.stringify(quad))) return false;
+  list.push({ object: 1, kind: m[0], face: m[1], quad }); return true;
+}
+function setFace(f) { face = f; document.querySelectorAll('.facebtn').forEach(b => b.classList.toggle('on', b.dataset.face === f)); }
+document.querySelectorAll('.facebtn').forEach(b => b.onclick = () => setFace(b.dataset.face));
+function objects() { const s = new Set((labels[DATA[cur].image] || []).map(f => f.object)); s.add(objNo); return [...s].sort((a, b) => a - b); }
+function objMenu() {
+  objSel.innerHTML = ''; objects().forEach(n => objSel.add(new Option(`#${n}`, n))); objSel.value = objNo;
+  const f = (labels[DATA[cur].image] || []).find(f => f.object === objNo); if (f) kindSel.value = f.kind;
+}
+objSel.onchange = () => { objNo = +objSel.value; objMenu(); objList(); };
+document.getElementById('newobj').onclick = newObj;
+function newObj() { objNo = Math.max(0, ...objects()) + 1; kindSel.value = defaultKind(); objMenu(); objList(); setFace("top"); }
+function defaultKind() {
+  const g = DATA[cur].group;
+  return KINDS[g] ? g : g.startsWith('lsp') ? 'lsp_single' : g === 'skid_loaded' ? 'cargo_wrap' : g.startsWith('skid') ? 'skid_single' : Object.keys(KINDS)[0];
+}
+kindSel.onchange = () => {   // the kind belongs to the object: relabel its faces
+  (labels[DATA[cur].image] || []).forEach(f => { if (f.object === objNo) f.kind = kindSel.value; }); persist(); objList();
+};
+function list() {
+  const el = document.getElementById('list'); el.innerHTML = ''; let g = null;
+  DATA.forEach((d, i) => {
+    if (d.group !== g) { g = d.group; const h = document.createElement('div'); h.className = 'grp'; h.innerHTML = `${g}<small>${GROUP_VI[g] || ''}</small>`; el.appendChild(h); }
+    const it = document.createElement('div'); it.className = 'it' + (i === cur ? ' sel' : '');
+    const fs = labels[d.image] || [], n = new Set(fs.map(f => f.object)).size;
+    it.innerHTML = `<span>${d.id} · ${d.camera}</span><span class="n">${fs.length ? `${n} obj · ${fs.length} faces` : ''}</span>`;
+    it.onclick = () => show(i); el.appendChild(it);
+  });
+  const all = Object.entries(labels).filter(([, f]) => f.length);
+  const nobj = all.reduce((a, [, f]) => a + new Set(f.map(x => x.object)).size, 0);
+  document.getElementById('count').textContent = `${nobj} objects, ${all.reduce((a, [, f]) => a + f.length, 0)} faces on ${all.length} images`;
+}
+function show(i) {
+  cur = i; pts = []; img = new Image(); objNo = 1;
+  img.onload = () => zoomTo(fitScale());
+  img.src = DATA[i].image;
+  kindSel.value = defaultKind();
+  document.getElementById('grpvi').innerHTML = `<b>Nhóm ảnh: ${DATA[i].group}</b><br>${GROUP_VI[DATA[i].group] || ''}`;
+  list(); objMenu(); objList(); setFace('top');
+}
+const stage = document.getElementById('stage');
+function fitScale() { return Math.min((stage.clientWidth - 20) / img.width, (stage.clientHeight - 20) / img.height); }
+function zoomTo(z, cx, cy) {   // keep the image point under (cx, cy) (canvas pixels) fixed on screen
+  z = Math.max(.5, Math.min(16, z));
+  const ix = cx === undefined ? null : cx / scale, iy = cy === undefined ? null : cy / scale;
+  const sx = cx === undefined ? 0 : cx - stage.scrollLeft, sy = cy === undefined ? 0 : cy - stage.scrollTop;
+  scale = z; cv.width = Math.round(img.width * z); cv.height = Math.round(img.height * z); draw();
+  if (ix !== null) { stage.scrollLeft = ix * z - sx; stage.scrollTop = iy * z - sy; }
+  document.getElementById('zval').textContent = Math.round(z * 100) + '%';
+}
+cv.addEventListener('wheel', e => {   // mouse wheel zooms around the cursor
+  e.preventDefault(); const r = cv.getBoundingClientRect();
+  zoomTo(scale * (e.deltaY < 0 ? 1.25 : .8), (e.clientX - r.left) * cv.width / r.width, (e.clientY - r.top) * cv.height / r.height);
+}, { passive: false });
+document.getElementById('zin').onclick = () => zoomTo(scale * 1.25, stage.scrollLeft + stage.clientWidth / 2, stage.scrollTop + stage.clientHeight / 2);
+document.getElementById('zout').onclick = () => zoomTo(scale * .8, stage.scrollLeft + stage.clientWidth / 2, stage.scrollTop + stage.clientHeight / 2);
+document.getElementById('zfit').onclick = () => zoomTo(fitScale());
+function poly(p, color, closed, label) {
+  ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+  p.forEach((q, k) => k ? ctx.lineTo(q[0] * scale, q[1] * scale) : ctx.moveTo(q[0] * scale, q[1] * scale));
+  if (closed) ctx.closePath(); ctx.stroke(); ctx.fillStyle = color;
+  p.forEach(q => ctx.fillRect(q[0] * scale - 3, q[1] * scale - 3, 6, 6));
+  if (label && p.length) {
+    const cx = p.reduce((a, q) => a + q[0], 0) / p.length, cy = p.reduce((a, q) => a + q[1], 0) / p.length;
+    ctx.font = 'bold 13px system-ui'; ctx.fillText(label, cx * scale - 20, cy * scale);
+  }
+}
+function draw() {
+  ctx.imageSmoothingEnabled = false; ctx.drawImage(img, 0, 0, cv.width, cv.height);
+  (labels[DATA[cur].image] || []).forEach(f => poly(f.quad, COLORS[f.face], true, `#${f.object} ${f.face}`));
+  poly(pts, COLORS[face], false);
+}
+function objList() {
+  const el = document.getElementById('objs'); el.innerHTML = '';
+  const fs = labels[DATA[cur].image] || [];
+  [...new Set(fs.map(f => f.object))].sort((a, b) => a - b).forEach(n => {
+    const box = document.createElement('div'); box.className = 'obj';
+    const own = fs.filter(f => f.object === n);
+    const head = document.createElement('div'); head.className = 'head';
+    head.innerHTML = `<b>#${n}</b>`;
+    const ks = document.createElement('select');   // change the kind of this object (all its faces)
+    Object.entries(KINDS).forEach(([k, v]) => ks.add(new Option(`${k} — ${v}`, k)));
+    ks.value = own[0].kind;
+    ks.onchange = () => { own.forEach(f => f.kind = ks.value); persist(); if (n === objNo) kindSel.value = ks.value; };
+    const pick = document.createElement('button'); pick.textContent = 'Select';
+    pick.onclick = () => { objNo = n; objMenu(); objList(); };
+    head.appendChild(ks); head.appendChild(pick); box.appendChild(head);
+    if (n === objNo) box.style.outline = '1px solid #5fd38d';
+    own.forEach(f => {
+      const row = document.createElement('div'); row.className = 'row';
+      row.innerHTML = `<span style="color:${COLORS[f.face]}">${f.face} (${FACE_VI[f.face]})</span>`;
+      const b = document.createElement('button'); b.textContent = 'Delete';
+      b.onclick = () => { fs.splice(fs.indexOf(f), 1); persist(); draw(); objList(); list(); objMenu(); };
+      row.appendChild(b); box.appendChild(row);
+    });
+    el.appendChild(box);
+  });
+}
+cv.onclick = e => {
+  const r = cv.getBoundingClientRect(), sx = cv.width / r.width;
+  const q = v => Math.round(v * 10) / 10;   // 0.1 px: zoomed-in clicks keep their precision
+  pts.push([q((e.clientX - r.left) * sx / scale), q((e.clientY - r.top) * sx / scale)]);
+  if (pts.length >= 5 && Math.hypot(pts[pts.length - 1][0] - pts[0][0], pts[pts.length - 1][1] - pts[0][1]) * scale < 10) {
+    pts.pop(); closeFace();   // clicking back on the first point closes the polygon
+  }
+  draw();
+};
+function closeFace() {
+  if (pts.length < 4) return;
+  if (pts.length === 4) {   // a plain quad: click order does not matter, sort clockwise from the top-left
+    const cx = pts.reduce((a, q) => a + q[0], 0) / 4, cy = pts.reduce((a, q) => a + q[1], 0) / 4;
+    pts.sort((p, q) => Math.atan2(p[1] - cy, p[0] - cx) - Math.atan2(q[1] - cy, q[0] - cx));
+    const s = pts.reduce((k, q, i) => q[0] + q[1] < pts[k][0] + pts[k][1] ? i : k, 0);
+    pts = pts.slice(s).concat(pts.slice(0, s));
+  }
+  const fs = labels[DATA[cur].image] = labels[DATA[cur].image] || [];
+  fs.push({ object: objNo, kind: kindSel.value, face, quad: pts }); pts = [];
+  persist(); objList(); list(); objMenu(); draw();
+}
+document.getElementById('close').onclick = closeFace;
+document.getElementById('undo').onclick = () => { pts.pop(); draw(); };
+document.onkeydown = e => {
+  if (e.target.tagName === 'SELECT') return;
+  if (e.key === 'ArrowRight') show(Math.min(DATA.length - 1, cur + 1));
+  if (e.key === 'ArrowLeft') show(Math.max(0, cur - 1));
+  if (e.key === 'z' || e.key === 'Z') { pts.pop(); draw(); }
+  if (e.key === 'n' || e.key === 'N') newObj();
+  if (e.key === '1') setFace('top'); if (e.key === '2') setFace('front'); if (e.key === '3') setFace('right');
+  if (e.key === 'Enter') closeFace();
+  if (e.key === 'f' || e.key === 'F') zoomTo(fitScale());
+  if (e.key === '+' || e.key === '=') document.getElementById('zin').click();
+  if (e.key === '-') document.getElementById('zout').click();
+};
+document.getElementById('save').onclick = () => {
+  const faces = [];
+  DATA.forEach(d => (labels[d.image] || []).forEach(f => faces.push({ object: `${d.id}#${f.object}`, kind: f.kind, face: f.face,
+    image: 'work/face_labeling/' + d.image, id: d.id, camera: d.camera, video: d.video, t_s: d.t_s, frame_box: d.frame_box, quad: f.quad })));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify({ version: 2, faces }, null, 1)], { type: 'application/json' }));
+  a.download = 'faces.json'; a.click();
+};
+document.getElementById('loadbtn').onclick = () => document.getElementById('load').click();
+document.getElementById('load').onchange = e => {
+  const file = e.target.files[0]; if (!file) return;
+  file.text().then(t => {
+    let data; try { data = JSON.parse(t); } catch (err) { document.getElementById('count').textContent = 'Not a JSON file'; return; }
+    const known = new Set(DATA.map(d => d.image)); let added = 0, skipped = 0;
+    (data.faces || []).forEach(f => {
+      const im = String(f.image || '').replace(/^work\/face_labeling\//, '');
+      if (!known.has(im) || !Array.isArray(f.quad)) { skipped++; return; }
+      if (!f.face) { added += addLegacy(im, f.texture, f.quad) ? 1 : 0; return; }   // first-round file
+      const list = labels[im] = labels[im] || [], n = +String(f.object).split('#').pop() || 1;
+      if (list.some(g => g.object === n && g.face === f.face && JSON.stringify(g.quad) === JSON.stringify(f.quad))) return;
+      list.push({ object: n, kind: SINGLE[f.kind] || f.kind, face: f.face, quad: f.quad }); added++;
+    });
+    persist(); show(cur);
+    document.getElementById('count').textContent += ` · loaded ${added} faces` + (skipped ? `, ${skipped} skipped` : '');
+  });
+  e.target.value = '';
+};
+const howto = document.getElementById('howto');
+try { howto.open = localStorage.getItem('face-howto') === 'open'; } catch (e) { howto.open = false; }   // hidden by default
+howto.ontoggle = () => { try { localStorage.setItem('face-howto', howto.open ? 'open' : 'closed'); } catch (e) {} };
+show(0);
+</script>
+</body>
+</html>

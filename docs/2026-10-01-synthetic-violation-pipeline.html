@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="vi">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -74,137 +74,137 @@
 </head>
 <body>
 <main>
-  <h1>Pipeline sinh ảnh vi phạm tổng hợp (AAT)</h1>
-  <p class="lead">Chèn LSP và cargo dựng 3D vào khung hình camera thật có sẵn xe nâng, theo kịch bản
-    <em>Forklift Pushing Multiple LSPs</em>. Pipeline chia ba giai đoạn theo tần suất chạy:
-    A làm một lần, dùng chung mọi camera; B làm một lần cho mỗi camera; C chạy tự động mỗi lần sinh ảnh.</p>
+  <h1>Synthetic violation image pipeline (AAT)</h1>
+  <p class="lead">Insert 3D-built LSPs and cargo into real camera frames that already contain a forklift, following the
+    <em>Forklift Pushing Multiple LSPs</em> scenario. The pipeline has three stages, split by how often they run:
+    A runs once and is shared by every camera; B runs once per camera; C runs automatically for every image.</p>
 
-  <div class="flow" role="img" aria-label="Ba giai đoạn A, B, C nối tiếp nhau">
+  <div class="flow" role="img" aria-label="Three stages A, B, C in sequence">
     <div class="stage a">
-      <div class="tag">A · Dữ liệu &amp; asset</div>
-      <div class="freq">Một lần, dùng chung</div>
-      <p>Vật mẫu, asset render, mô hình khớp xe, bảng số liệu chuẩn, danh mục kịch bản.</p>
+      <div class="tag">A · Data &amp; assets</div>
+      <div class="freq">Once, shared</div>
+      <p>Object samples, render assets, forklift fitting proxy, reference dimensions, scenario catalogue.</p>
     </div>
     <div class="arrow" aria-hidden="true">→</div>
     <div class="stage b">
-      <div class="tag">B · Bối cảnh camera</div>
-      <div class="freq">Một lần mỗi camera</div>
-      <p>Hiệu chỉnh camera và sàn, kiểm tra bằng vật chuẩn, vùng đặt hàng, ánh sáng và màu.</p>
+      <div class="tag">B · Camera context</div>
+      <div class="freq">Once per camera</div>
+      <p>Camera and floor calibration, checks against known objects, placement zone, lighting and colour.</p>
     </div>
     <div class="arrow" aria-hidden="true">→</div>
     <div class="stage c">
       <div class="tag">C · Pipeline</div>
-      <div class="freq">Tự động, mỗi lần sinh ảnh</div>
+      <div class="freq">Automatic, every image</div>
       <div class="steps-inline">
-        <span>1 RTSP &amp; lọc khung</span><span>2 Vị trí &amp; hướng xe</span><span>3 Đặt LSP &amp; cargo</span>
-        <span>4 Che khuất</span><span>5 Ghép &amp; xuất</span><span>6 Duyệt chất lượng</span>
+        <span>1 RTSP &amp; frame filter</span><span>2 Forklift pose &amp; heading</span><span>3 Place LSP &amp; cargo</span>
+        <span>4 Occlusion</span><span>5 Composite &amp; export</span><span>6 Quality review</span>
       </div>
     </div>
   </div>
 
-  <h2>Trạng thái từng bước</h2>
+  <h2>Status of each step</h2>
   <div class="legend">
-    <span><span class="badge ok">Đã có</span> chạy được trong repo</span>
-    <span><span class="badge part">Thử nghiệm</span> chạy được ở dạng POC, chưa vào repo</span>
-    <span><span class="badge todo">Chưa có</span> cần làm</span>
+    <span><span class="badge ok">Done</span> runs in the repo</span>
+    <span><span class="badge part">Trial</span> runs as a POC, not yet in the repo</span>
+    <span><span class="badge todo">To do</span> still needed</span>
   </div>
 
-  <h3 style="color:var(--a)">A. Chuẩn bị dữ liệu, dựng asset và hệ thống số liệu</h3>
+  <h3 style="color:var(--a)">A. Data preparation, asset building and reference numbers</h3>
   <div class="grid">
-    <div class="card a"><h3>A1. Thu vật mẫu <span class="badge part">cam01</span></h3>
-      <dl><dt>Làm gì</dt><dd>SAM3 tách LSP, cargo, SKID, xe nâng; chọn ảnh cắt rõ nhất; chuẩn hóa màu giữa các camera.</dd>
-      <dt>Đầu ra</dt><dd><code>work/refs/</code>, <code>work/masks/</code></dd>
-      <dt>Còn thiếu</dt><dd>Thu từ nhiều camera, chuẩn hóa màu.</dd></dl></div>
-    <div class="card a"><h3>A2. Asset render <span class="badge ok">Đã có</span></h3>
-      <dl><dt>Làm gì</dt><dd>Dựng LSP, cargo (ULD, thùng), SKID bằng Blender qua CLI-Anything, texture từ ảnh thật.</dd>
+    <div class="card a"><h3>A1. Object samples <span class="badge part">cam01</span></h3>
+      <dl><dt>What</dt><dd>SAM3 segments LSPs, cargo, SKIDs and forklifts; keeps the sharpest crops; normalises colour across cameras.</dd>
+      <dt>Output</dt><dd><code>work/refs/</code>, <code>work/masks/</code></dd>
+      <dt>Missing</dt><dd>Samples from several cameras, colour normalisation.</dd></dl></div>
+    <div class="card a"><h3>A2. Render assets <span class="badge ok">Done</span></h3>
+      <dl><dt>What</dt><dd>LSP, cargo (ULD, cartons) and SKID built in Blender through CLI-Anything, textured from real photos.</dd>
       <dt>Code</dt><dd><code>synth/build_assets.py</code>, <code>blender/build_lsp.py</code></dd>
-      <dt>Đầu ra</dt><dd><code>work/assets/*.blend</code> + JSON kích thước</dd></dl></div>
-    <div class="card a"><h3>A3. Mô hình khớp xe <span class="badge part">Thử nghiệm</span></h3>
-      <dl><dt>Làm gì</dt><dd>Mô hình hình học theo thông số chính hãng của từng loại xe, dùng để tìm vị trí và hướng xe thật (không render).</dd>
-      <dt>cam01</dt><dd>Sumitomo QuaPro 2.0–2.5 t, bánh trước đôi: cơ sở 1625 mm, vệt bánh 1405/970 mm, càng cách trục trước 477 mm.</dd></dl></div>
-    <div class="card a"><h3>A4. Bảng số liệu chuẩn <span class="badge part">Một phần</span></h3>
-      <dl><dt>Làm gì</dt><dd>Kích thước chuẩn: LSP, ULD (AKE 1.56 × 1.53 × 1.63 m), thông số xe. Dùng để dựng asset và kiểm tra hiệu chỉnh.</dd>
-      <dt>Còn thiếu</dt><dd>Kích thước LSP đo thật.</dd></dl></div>
-    <div class="card a"><h3>A5. Danh mục kịch bản <span class="badge ok">Đã có</span></h3>
-      <dl><dt>Làm gì</dt><dd>V1–V8 vi phạm (≥ 2 LSP), N1–N5 hợp lệ và dễ nhầm; tham số biến thể.</dd>
-      <dt>Nguồn</dt><dd><code>docs/superpowers/specs/</code>, <code>config.json</code></dd></dl></div>
+      <dt>Output</dt><dd><code>work/assets/*.blend</code> + size JSON</dd></dl></div>
+    <div class="card a"><h3>A3. Forklift fitting proxy <span class="badge part">Trial</span></h3>
+      <dl><dt>What</dt><dd>Geometric model from the manufacturer's specs of each truck type, used to find the real truck's position and heading (not rendered).</dd>
+      <dt>cam01</dt><dd>Sumitomo QuaPro 2.0–2.5 t, dual front tyres: wheelbase 1625 mm, tread 1405/970 mm, fork face 477 mm from the front axle.</dd></dl></div>
+    <div class="card a"><h3>A4. Reference dimensions <span class="badge part">Partial</span></h3>
+      <dl><dt>What</dt><dd>Standard sizes: LSP, ULD (AKE 1.56 × 1.53 × 1.63 m), truck specs. Used to build assets and check calibration.</dd>
+      <dt>Missing</dt><dd>A measured real LSP size.</dd></dl></div>
+    <div class="card a"><h3>A5. Scenario catalogue <span class="badge ok">Done</span></h3>
+      <dl><dt>What</dt><dd>V1–V8 violations (≥ 2 LSPs), N1–N5 valid and look-alike scenes; variation parameters.</dd>
+      <dt>Source</dt><dd><code>docs/superpowers/specs/</code>, <code>config.json</code></dd></dl></div>
   </div>
 
-  <h3 style="color:var(--b); margin-top:22px">B. Chuẩn bị bối cảnh cho từng camera</h3>
+  <h3 style="color:var(--b); margin-top:22px">B. Per-camera context</h3>
   <div class="grid">
-    <div class="card b"><h3>B1. Hiệu chỉnh camera &amp; sàn <span class="badge ok">Đã có</span></h3>
-      <dl><dt>Làm gì</dt><dd>MoGe-2 trên ảnh nền cho ra camera, mặt sàn, bản đồ XYZ của sàn.</dd>
+    <div class="card b"><h3>B1. Camera &amp; floor calibration <span class="badge ok">Done</span></h3>
+      <dl><dt>What</dt><dd>MoGe-2 on the background image gives the camera, the floor plane and an XYZ map of the floor.</dd>
       <dt>Code</dt><dd><code>synth/calibrate.py</code> → <code>work/camera.json</code></dd></dl></div>
-    <div class="card b"><h3>B2. Kiểm tra bằng vật chuẩn <span class="badge part">Thử nghiệm</span></h3>
-      <dl><dt>Làm gì</dt><dd>Đo lại vật đã biết kích thước; tính hệ số bù.</dd>
-      <dt>cam01</dt><dd>Mặt sàn đúng khoảng ±5% ở vùng giữa; chiều cao ngắn đi khoảng 15–20%, nên bù ×0.85.</dd></dl></div>
-    <div class="card b"><h3>B3. Vùng đặt hàng &amp; vùng cấm <span class="badge todo">Chưa có</span></h3>
-      <dl><dt>Làm gì</dt><dd>Vùng sàn cho phép đặt; loại sát mép ảnh (sai số sàn lớn), lối người đi, vùng che cố định.</dd></dl></div>
-    <div class="card b"><h3>B4. Ánh sáng &amp; màu <span class="badge part">Một phần</span></h3>
-      <dl><dt>Làm gì</dt><dd>Ánh sáng môi trường, độ bão hòa, nhiễu, méo ống kính khi ghép.</dd>
-      <dt>Nguồn</dt><dd><code>work/scene_facts.json</code>, mục <code>composite</code> trong <code>config.json</code></dd></dl></div>
-    <div class="card b"><h3>B5. Render thử để duyệt <span class="badge todo">Chưa có</span></h3>
-      <dl><dt>Làm gì</dt><dd>Một cảnh mẫu cho mỗi camera; người duyệt trước khi chạy hàng loạt.</dd></dl></div>
+    <div class="card b"><h3>B2. Checks against known objects <span class="badge part">Trial</span></h3>
+      <dl><dt>What</dt><dd>Re-measure objects of known size; derive correction factors.</dd>
+      <dt>cam01</dt><dd>Floor plane within about ±5% in the centre; heights come out about 15–20% short, so they are corrected by ×0.85.</dd></dl></div>
+    <div class="card b"><h3>B3. Placement zone &amp; exclusions <span class="badge todo">To do</span></h3>
+      <dl><dt>What</dt><dd>Floor area where objects may be placed; excludes the image border (large floor error), walkways and fixed occluders.</dd></dl></div>
+    <div class="card b"><h3>B4. Lighting &amp; colour <span class="badge part">Partial</span></h3>
+      <dl><dt>What</dt><dd>Ambient light, saturation, noise and lens distortion for compositing.</dd>
+      <dt>Source</dt><dd><code>work/scene_facts.json</code>, the <code>composite</code> section of <code>config.json</code></dd></dl></div>
+    <div class="card b"><h3>B5. Review render <span class="badge todo">To do</span></h3>
+      <dl><dt>What</dt><dd>One sample scene per camera, reviewed by a person before batch runs.</dd></dl></div>
   </div>
 
-  <h3 style="color:var(--c); margin-top:22px">C. Pipeline tự động</h3>
+  <h3 style="color:var(--c); margin-top:22px">C. Automatic pipeline</h3>
   <div class="grid">
-    <div class="card c"><h3>C1. RTSP &amp; lọc khung <span class="badge part">Thử nghiệm</span></h3>
-      <dl><dt>Làm gì</dt><dd>Ghi video; SAM3 tìm và bám xe; giữ khung thấy trọn xe, không chạm mép, xe đủ lớn, ưu tiên xe đang chạy.</dd>
-      <dt>Đã chạy</dt><dd>Video 10 phút cam01; 541/599 khung có xe; bám 150/150 khung liên tiếp.</dd></dl></div>
-    <div class="card c"><h3>C2. Vị trí &amp; hướng xe <span class="badge part">Thử nghiệm</span></h3>
-      <dl><dt>Làm gì</dt><dd>Khớp hình bóng cho ra vị trí và đầu càng; độ sâu MoGe để chốt khoảng cách; hướng lấy từ quỹ đạo trục trước khi xe chạy.</dd>
-      <dt>Hiện trạng</dt><dd>Vị trí lệch khoảng 0.05–0.3 m; góc theo hình bóng lệch khoảng 8°, hướng từ chuyển động tốt hơn; khoảng 1 giây mỗi khung.</dd></dl></div>
-    <div class="card c"><h3>C3. Đặt LSP &amp; cargo <span class="badge ok">Đã có</span></h3>
-      <dl><dt>Làm gì</dt><dd>Đặt theo hướng càng, số LSP và cargo theo kịch bản; render Blender.</dd>
+    <div class="card c"><h3>C1. RTSP &amp; frame filter <span class="badge part">Trial</span></h3>
+      <dl><dt>What</dt><dd>Record video; SAM3 finds and tracks trucks; keep frames where the whole truck is visible, away from the border, large enough, preferably moving.</dd>
+      <dt>Run so far</dt><dd>10-minute cam01 video; 541/599 frames contain a truck; 150/150 consecutive frames tracked.</dd></dl></div>
+    <div class="card c"><h3>C2. Forklift pose &amp; heading <span class="badge part">Trial</span></h3>
+      <dl><dt>What</dt><dd>Silhouette fitting gives the position and the fork end; MoGe depth fixes the distance; the heading comes from the front-axle track while the truck moves.</dd>
+      <dt>Status</dt><dd>Position error about 0.05–0.3 m; silhouette heading off by about 8°, motion heading is better; about 1 s per frame.</dd></dl></div>
+    <div class="card c"><h3>C3. Place LSP &amp; cargo <span class="badge ok">Done</span></h3>
+      <dl><dt>What</dt><dd>Place along the fork direction, LSP and cargo count per scenario; render in Blender.</dd>
       <dt>Code</dt><dd><code>blender/render_anchor_poc.py</code></dd>
-      <dt>Còn thiếu</dt><dd>Kiểm tra chỗ trống (người hoặc vật cản trong vùng đặt).</dd></dl></div>
-    <div class="card c"><h3>C4. Che khuất <span class="badge part">Thử nghiệm</span></h3>
-      <dl><dt>Làm gì</dt><dd>So độ sâu từng pixel: hàng che xe; xe và người che hàng; bóng đổ cũng bị che.</dd>
-      <dt>Hiện trạng</dt><dd>Chạy được trên ảnh tĩnh; chưa gắn MoGe từng khung video.</dd></dl></div>
-    <div class="card c"><h3>C5. Ghép &amp; xuất <span class="badge ok">Đã có</span></h3>
-      <dl><dt>Làm gì</dt><dd>Ghép vào ảnh gốc; xuất ảnh kèm JSON: bbox sự kiện và từng vật, kịch bản, nhãn vi phạm, điểm tin cậy.</dd>
-      <dt>Code</dt><dd><code>synth/composite_anchor_poc.py</code> (có <code>occluder_masks</code>)</dd></dl></div>
-    <div class="card c"><h3>C6. Duyệt chất lượng <span class="badge todo">Chưa có</span></h3>
-      <dl><dt>Làm gì</dt><dd>Máy ghi chỉ số (IoU khớp, sai số chiếu lại, pixel bị che); người duyệt ngẫu nhiên một phần ảnh.</dd></dl></div>
+      <dt>Missing</dt><dd>Free-space check (people or obstacles in the placement area).</dd></dl></div>
+    <div class="card c"><h3>C4. Occlusion <span class="badge part">Trial</span></h3>
+      <dl><dt>What</dt><dd>Per-pixel depth comparison: cargo hides the truck; the truck and people hide the cargo; shadows are hidden too.</dd>
+      <dt>Status</dt><dd>Works on still images; not yet wired to per-frame MoGe on video.</dd></dl></div>
+    <div class="card c"><h3>C5. Composite &amp; export <span class="badge ok">Done</span></h3>
+      <dl><dt>What</dt><dd>Composite into the original frame; export the image with JSON: event and per-object boxes, scenario, violation label, confidence.</dd>
+      <dt>Code</dt><dd><code>synth/composite_anchor_poc.py</code> (with <code>occluder_masks</code>)</dd></dl></div>
+    <div class="card c"><h3>C6. Quality review <span class="badge todo">To do</span></h3>
+      <dl><dt>What</dt><dd>The machine logs metrics (fit IoU, reprojection error, occluded pixels); a person reviews a random share of the images.</dd></dl></div>
   </div>
 
-  <h2>Dữ liệu chuyển giữa các bước</h2>
-  <p class="lead">Mỗi bước ghi đầu ra thành file riêng, để chạy lại một bước mà không phải chạy lại cả chuỗi.</p>
+  <h2>Data passed between steps</h2>
+  <p class="lead">Each step writes its output to its own files, so one step can be rerun without rerunning the whole chain.</p>
   <div class="table-wrap">
   <table>
-    <thead><tr><th>Bước</th><th>Đầu vào</th><th>Đầu ra</th></tr></thead>
+    <thead><tr><th>Step</th><th>Input</th><th>Output</th></tr></thead>
     <tbody>
-      <tr><td>A</td><td>Ảnh và video các camera, thông số chính hãng</td><td>Asset <code>.blend</code>, mô hình khớp xe, bảng số liệu</td></tr>
-      <tr><td>B</td><td>Ảnh nền từng camera, bảng số liệu</td><td>Camera, mặt sàn, hệ số bù, vùng đặt hàng, thông số ánh sáng</td></tr>
-      <tr><td>C1</td><td>Luồng RTSP</td><td>Danh sách khung dùng được, mask và vết bám xe</td></tr>
-      <tr><td>C2</td><td>Khung, mask, camera, mô hình khớp</td><td>Tư thế xe (x, y, góc), điểm tin cậy</td></tr>
-      <tr><td>C3</td><td>Tư thế xe, kịch bản, asset</td><td>Render RGBA, vị trí từng vật</td></tr>
-      <tr><td>C4</td><td>Render, độ sâu MoGe, tư thế xe</td><td>Mask che khuất</td></tr>
-      <tr><td>C5</td><td>Khung gốc, render, mask che</td><td>Ảnh vi phạm và JSON nhãn</td></tr>
+      <tr><td>A</td><td>Images and videos from the cameras, manufacturer specs</td><td><code>.blend</code> assets, forklift fitting proxy, reference dimensions</td></tr>
+      <tr><td>B</td><td>Background image per camera, reference dimensions</td><td>Camera, floor plane, correction factors, placement zone, lighting parameters</td></tr>
+      <tr><td>C1</td><td>RTSP stream</td><td>Usable frames, truck masks and tracks</td></tr>
+      <tr><td>C2</td><td>Frames, masks, camera, fitting proxy</td><td>Truck pose (x, y, heading), confidence</td></tr>
+      <tr><td>C3</td><td>Truck pose, scenario, assets</td><td>RGBA render, position of each object</td></tr>
+      <tr><td>C4</td><td>Render, MoGe depth, truck pose</td><td>Occlusion mask</td></tr>
+      <tr><td>C5</td><td>Original frame, render, occlusion mask</td><td>Violation image and JSON label</td></tr>
     </tbody>
   </table>
   </div>
 
-  <h2>Phát hiện chính trên cam01</h2>
+  <h2>Key findings on cam01</h2>
   <ul>
-    <li>Xe trong kho mang thiết kế Sumitomo QuaPro 2.0–2.5 t, sơn vàng, bánh trước đôi (bề ngang khoảng 1.6 m). Asset xe cũ sai kích thước, nên không dùng để neo.</li>
-    <li>Camera hiệu chỉnh đúng trên mặt sàn nhưng làm chiều cao ngắn đi khoảng 15–20%; hiện bù bằng hệ số ×0.85.</li>
-    <li>Góc quay đoán từ hình bóng thiên lệch khoảng 8°; hướng suy từ chuyển động của xe (tâm trục trước) tin cậy hơn.</li>
-    <li>Che khuất bằng so độ sâu cho kết quả tương đương mask vẽ tay trên ảnh thử.</li>
+    <li>The trucks in the warehouse follow the Sumitomo QuaPro 2.0–2.5 t design, painted yellow, with dual front tyres (about 1.6 m wide). The old truck asset had wrong dimensions, so it is not used as an anchor.</li>
+    <li>The calibrated camera is correct on the floor but makes heights about 15–20% short; this is currently corrected by ×0.85.</li>
+    <li>The heading guessed from the silhouette is biased by about 8°; the heading from the truck's motion (front-axle centre) is more reliable.</li>
+    <li>Depth-based occlusion matches hand-drawn masks on the test images.</li>
   </ul>
-  <div class="note">Các số liệu trên được kiểm tra trên 3 ảnh tĩnh và một đoạn video; chưa chạy hàng loạt.</div>
+  <div class="note">These numbers were checked on 3 still images and one video clip; no batch run yet.</div>
 
-  <h2>Việc tiếp theo</h2>
+  <h2>Next steps</h2>
   <ol class="next">
-    <li>Làm mượt hướng trên cả đoạn xe chạy (C2).</li>
-    <li>Kiểm tra chỗ trống trước càng (C3).</li>
-    <li>Gắn MoGe từng khung và che khuất cho video (C4).</li>
-    <li>Chạy hàng loạt trên video cam01, xuất bộ ảnh để duyệt (C1–C6).</li>
-    <li>Tách code theo 3 giai đoạn; thêm camera khác cho A và B.</li>
+    <li>Smooth the heading over a whole driving segment (C2).</li>
+    <li>Check for free space in front of the forks (C3).</li>
+    <li>Wire per-frame MoGe and occlusion for video (C4).</li>
+    <li>Batch run on the cam01 video and export an image set for review (C1–C6).</li>
+    <li>Split the code by the 3 stages; add other cameras for A and B.</li>
   </ol>
 
-  <footer>Cập nhật 2026-10-01 · repo <code>aat-violation-synth</code>, nhánh <code>feat/forklift-synthetic-scenes</code></footer>
+  <footer>Updated 2026-10-01 · repo <code>aat-violation-synth</code>, branch <code>feat/forklift-synthetic-scenes</code></footer>
 </main>
 </body>
 </html>

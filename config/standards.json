@@ -9,9 +9,10 @@
   },
   "skid": {
     "size_m": [1.2, 1.0],
-    "height_m": 0.151,
-    "source": "existing skid asset, fitted to cam01 crops",
-    "confidence": "medium"
+    "height_m": 0.13,
+    "contour": "closed top deck of boards edge to edge on 2-3 runners, no bottom deck",
+    "source": "assumed (user's pallet/skid reference image, 2026-10-03); the site uses SKIDs only, not pallets",
+    "confidence": "low"
   },
   "uld": {
     "AKE": {

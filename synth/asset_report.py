@@ -38,23 +38,23 @@ def main():
         draw.text((x+8,y+390),f"{meta['mesh_objects']} meshes | {name}.blend",font=small,fill='#b7c6d1')
         reference=work/'refs'/refs[name] if name in refs else work/'textures'/f'{name}.png'
         buttons=[]
-        for suffix,title in [('', 'Góc trước'),('_rear','Góc sau')]:
+        for suffix,title in [('', 'Front view'),('_rear','Rear view')]:
             buttons.append(f'<button data-src="{uri(work/"previews"/f"{name}_pass3{suffix}.png")}">{title}</button>')
         for stage in [1,2]:
             p=work/'previews'/f'{name}_pass{stage}.png'
-            if p.exists():buttons.append(f'<button data-src="{uri(p)}">Lượt {stage}</button>')
+            if p.exists():buttons.append(f'<button data-src="{uri(p)}">Pass {stage}</button>')
         cards.append(f'''<article><h2>{html.escape(label)}</h2><div class="pair">
-<figure><img src="{uri(reference)}"><figcaption>Ảnh nguồn / texture thật</figcaption></figure>
-<figure><img class="preview" src="{uri(work/'previews'/f'{name}_pass3.png')}"><figcaption>Model 3D đã dựng</figcaption></figure></div>
+<figure><img src="{uri(reference)}"><figcaption>Source photo / real texture</figcaption></figure>
+<figure><img class="preview" src="{uri(work/'previews'/f'{name}_pass3.png')}"><figcaption>Built 3D model</figcaption></figure></div>
 <div class="buttons">{''.join(buttons)}</div><p>{dims} · {meta['mesh_objects']} mesh</p>
-<a href="../assets/{name}.blend">Mở / tải .blend</a> · <a href="../assets/{name}.glb">Tải .glb</a>
-<details><summary>Thông số và giới hạn</summary><pre>{html.escape(json.dumps(meta,indent=2,ensure_ascii=False))}</pre></details></article>''')
+<a href="../assets/{name}.blend">Open / download .blend</a> · <a href="../assets/{name}.glb">Download .glb</a>
+<details><summary>Specs and limitations</summary><pre>{html.escape(json.dumps(meta,indent=2,ensure_ascii=False))}</pre></details></article>''')
     sheet.save(review/'contact_sheet.jpg',quality=94)
     limitations=''.join('<li>'+html.escape(item)+'</li>' for item in sources['limitations'])
-    page='''<!doctype html><html lang="vi"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    page='''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AAT — 3D asset review</title><style>body{margin:0;background:#101820;color:#eef4f7;font:16px system-ui;line-height:1.6}main{max-width:1150px;margin:auto;padding:30px}h1{font-size:32px;margin-bottom:5px}p{color:#bdccd7}article{background:#192731;padding:24px;margin:25px 0;border-radius:14px}h2{margin-top:0}.pair{display:grid;grid-template-columns:1fr 2fr;gap:18px}figure{margin:0}img{width:100%;height:360px;object-fit:contain;background:#263540;border-radius:8px}figcaption{color:#c4d5df}button{background:#314754;color:white;border:1px solid #526874;border-radius:6px;padding:8px 14px;margin:10px 6px 0 0;cursor:pointer}a{color:#78d4de}pre{white-space:pre-wrap;font-size:13px}.notice{border-left:4px solid #edab63;padding:12px 20px;background:#25313a}summary{cursor:pointer;margin-top:16px}@media(max-width:650px){.pair{grid-template-columns:1fr}img{height:270px}main{padding:15px}}</style>
-<main><h1>AAT · Thư viện model 3D</h1><p>cam01 · 8 assets · Blender 5.2.2 · Mét · +Z lên trên · +Y hướng trước</p>
-<div class="notice">Đây là bản dựng để duyệt, chưa phải dữ liệu tổng hợp đã nghiệm thu. LSP dùng số đo MoGe; các kích thước còn lại là ước lượng từ ảnh. SKID thiếu ảnh đầy đủ nên dùng hình học pallet tham chiếu.</div>'''+''.join(cards)+f'<h2>Giới hạn nguồn dữ liệu</h2><ul>{limitations}</ul></main>'+'''
+<main><h1>AAT · 3D model library</h1><p>cam01 · 8 assets · Blender 5.2.2 · metres · +Z up · +Y forward</p>
+<div class="notice">These are review builds, not accepted synthetic data. The LSP uses the MoGe measurement; the other sizes are estimated from photos. The SKID lacks a complete photo, so it uses reference pallet geometry.</div>'''+''.join(cards)+f'<h2>Source data limitations</h2><ul>{limitations}</ul></main>'+'''
 <script>document.querySelectorAll('button[data-src]').forEach(b=>b.onclick=()=>b.closest('article').querySelector('.preview').src=b.dataset.src)</script></html>'''
     (review/'index.html').write_text(page)
     print(f'Review: {review}/index.html; contact_sheet.jpg; all source input hashes unchanged')
