@@ -650,7 +650,8 @@ def main() -> int:
                              "Image 5 geometry guide"], prompt, raw, work)
                 preserve_outside(accepted_sheet, raw, candidate, cargo_region, cargo_protected)
             candidate_masks = segmenter.get(candidate, ("LSP", "cargo"))
-            measured = verify_cargo_masks(sheet_masks, candidate_masks, sheet_outline, size, min_height_px=min_height)
+            measured = verify_cargo_masks(sheet_masks, candidate_masks, sheet_outline, size, cargo_region,
+                                          min_height_px=min_height)
             if args.aesthetic_review:
                 count_call(report, "visual review - cargo realism (Astra)")
             result = gate("cargo", accepted_sheet, raw, candidate, cargo_region, cargo_protected, measured, source,

@@ -654,34 +654,36 @@ def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[s
 
 
 def verify_cargo_masks(sheet: dict[str, list[np.ndarray]], candidate: dict[str, list[np.ndarray]],
-                       polygon: list[list[int]], size: tuple[int, int],
+                       polygon: list[list[int]], size: tuple[int, int], region: Image.Image,
                        min_height_px: int = 0) -> dict:
+    """One new cargo standing on the sheet (polygon: the sheet's outline), high enough, with the exposed deck
+    unchanged. New cargo is looked for inside the edit region only: outside it the candidate's pixels are the
+    base's, yet SAM3 segments them a little differently from one image to the next, and one such stray mask far
+    away used to become the "bottom" of the new cargo (s_003, 2026-10-05)."""
     target = polygon_mask(size, polygon)
+    inside = np.asarray(region) > 0
     sheet_cargo = union(sheet.get("cargo", []), target.shape)
     edited_cargo = union(candidate.get("cargo", []), target.shape)
-    added = edited_cargo & ~sheet_cargo
-    box = bbox(added)
+    added = edited_cargo & ~sheet_cargo & inside
+    new_instances = [mask for mask in candidate.get("cargo", [])
+                     if (mask & ~sheet_cargo & inside).sum() > 2000
+                     and bbox(mask) is not None
+                     and bbox(mask)[3] >= min(point[1] for point in polygon) - 20]
+    # the new object as SAM3 outlines it, also where it hides the original load (that part is not "added")
+    box = bbox(union(new_instances, target.shape))
     failures = []
+    support = None
     if box is None or added.sum() < 2500:
         failures.append("SAM3 found no substantial new cargo")
         supported = False
     else:
         if box[3] - box[1] < min_height_px:
             failures.append(f"New cargo height {box[3] - box[1]}px < {min_height_px}px")
-        bottom = added[max(0, box[3] - 12):box[3]]
-        ys, xs = np.nonzero(bottom)
-        if len(xs):
-            support_y = max(0, box[3] - 12) + int(np.median(ys))
-            support_x = int(np.median(xs))
-            supported = bool(target[support_y, support_x])
-        else:
-            supported = False
+        ys, xs = np.nonzero(union(new_instances, target.shape)[max(0, box[3] - 12):box[3]])
+        support = [int(np.median(xs)), max(0, box[3] - 12) + int(np.median(ys))]
+        supported = bool(target[support[1], support[0]])
         if not supported:
             failures.append("New cargo bottom centre is outside the accepted LSP footprint")
-    new_instances = [mask for mask in candidate.get("cargo", [])
-                     if (mask & ~sheet_cargo).sum() > 2000
-                     and bbox(mask) is not None
-                     and bbox(mask)[3] >= min(point[1] for point in polygon) - 20]
     if len(new_instances) != 1:
         failures.append(f"SAM3 found {len(new_instances)} new cargo instances; expected one")
     sheet_lsp = union(sheet.get("LSP", []), target.shape)
@@ -694,4 +696,5 @@ def verify_cargo_masks(sheet: dict[str, list[np.ndarray]], candidate: dict[str, 
     if lsp_change > 0.12:
         failures.append(f"LSP mask changed {lsp_change:.1%} after cargo; need <=12%")
     return {"passed": not failures, "failures": failures, "new_cargo_pixels": int(added.sum()),
-            "cargo_supported": supported, "lsp_mask_change_fraction": lsp_change}
+            "cargo_supported": supported, "cargo_box_px": list(box) if box else None, "support_px": support,
+            "lsp_mask_change_fraction": lsp_change}

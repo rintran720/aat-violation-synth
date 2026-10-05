@@ -128,7 +128,19 @@ class VisionGeometryTests(unittest.TestCase):
         cargo = empty.copy()
         cargo[20:90, 32:68] = True
         final = {"LSP": [deck & ~cargo], "cargo": [cargo]}
-        self.assertTrue(verify_cargo_masks(sheet, final, polygon, size)["passed"])
+        everywhere = Image.new("L", size, 255)
+        self.assertTrue(verify_cargo_masks(sheet, final, polygon, size, everywhere)["passed"])
+        # SAM3 segments an unchanged object elsewhere in the frame differently in the two images (s_003: a 7000 px
+        # "cargo" at the left edge and the rims of the parked containers). Only the edit region can hold new cargo.
+        stray = empty.copy()
+        stray[4:109, 96:118] = True
+        region = Image.new("L", size, 0)
+        ImageDraw.Draw(region).rectangle((5, 0, 92, 100), fill=255)
+        flicker = {"LSP": [deck & ~cargo], "cargo": [cargo, stray]}
+        measured = verify_cargo_masks(sheet, flicker, polygon, size, region)
+        self.assertTrue(measured["passed"], measured["failures"])
+        self.assertEqual(measured["new_cargo_pixels"], int(cargo.sum()))
+        self.assertFalse(verify_cargo_masks(sheet, flicker, polygon, size, everywhere)["passed"])
 
     def test_rejects_oversized_sheet_and_unsupported_cargo(self):
         size = (120, 110)
@@ -139,7 +151,8 @@ class VisionGeometryTests(unittest.TestCase):
         cargo = np.zeros(deck.shape, bool)
         cargo[20:90, 85:115] = True
         final = {"LSP": [deck], "cargo": [cargo]}
-        self.assertFalse(verify_cargo_masks({"LSP": [deck], "cargo": []}, final, polygon, size)["passed"])
+        self.assertFalse(verify_cargo_masks({"LSP": [deck], "cargo": []}, final, polygon, size,
+                                            Image.new("L", size, 255))["passed"])
 
     def test_equal_sheet_touching_the_front_edge_passes(self):
         measured = measure(rect(20, 10, 114, 101), rect(20, 102, 114, 193))
