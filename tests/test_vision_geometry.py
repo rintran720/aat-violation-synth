@@ -8,7 +8,39 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from synth.vision_geometry import (edit_region, guide_marks, polygon_mask, preserve_outside, raw_drift,
-                                   top_face_edge, verify_cargo_masks, verify_sheet_masks)
+                                   top_face_edge, verify_cargo_masks, verify_sheet_geometry)
+
+
+SCALE = .02                     # metres per pixel on the synthetic floor
+CALIBRATED = [1.9, 1.85]        # LSP width along the shared edge, depth across it
+SIZE = (140, 240)               # image width, height
+EDGE = [[20, 101], [114, 101]]  # front edge of the original sheet's top face
+TOWARD = [67, 190]              # a pixel on the side where the new sheet belongs
+
+
+def rect(x0, y0, x1, y1):
+    return polygon_mask(SIZE, [[x0, y0], [x1, y0], [x1, y1], [x0, y1]])
+
+
+def scene(old, new):
+    """Camera 3 m above a flat floor, looking straight down; sheet pixels are 9 cm higher. Returns the point map,
+    its validity, the free floor, and SAM3-like source/candidate masks."""
+    height, width = SIZE[1], SIZE[0]
+    rows, cols = np.mgrid[0:height, 0:width]
+    depth = np.full((height, width), 3.)
+    depth[old | new] -= .09
+    points = np.dstack([(cols - width / 2) * SCALE, (rows - height / 2) * SCALE, depth])
+    valid = np.ones((height, width), bool)
+    floor = ~(old | new)
+    source = {"LSP": [old], "cargo": []}
+    candidate = {"LSP": [old, new], "cargo": []}
+    return points, valid, floor, source, candidate
+
+
+def measure(old, new):
+    points, valid, floor, source, candidate = scene(old, new)
+    region = Image.new("L", SIZE, 255)
+    return verify_sheet_geometry(source, candidate, region, points, valid, floor, EDGE, TOWARD, CALIBRATED)
 
 
 class VisionGeometryTests(unittest.TestCase):
@@ -19,7 +51,6 @@ class VisionGeometryTests(unittest.TestCase):
         empty = np.zeros(deck.shape, bool)
         source = {"LSP": [], "cargo": []}
         sheet = {"LSP": [deck], "cargo": []}
-        self.assertTrue(verify_sheet_masks(source, sheet, polygon, size)["passed"])
         cargo = empty.copy()
         cargo[20:90, 32:68] = True
         final = {"LSP": [deck & ~cargo], "cargo": [cargo]}
@@ -31,33 +62,54 @@ class VisionGeometryTests(unittest.TestCase):
         deck = polygon_mask(size, polygon)
         huge = np.zeros(deck.shape, bool)
         huge[45:105, 10:110] = True
-        source = {"LSP": [], "cargo": []}
-        sheet = {"LSP": [huge], "cargo": []}
-        self.assertFalse(verify_sheet_masks(source, sheet, polygon, size)["passed"])
         cargo = np.zeros(deck.shape, bool)
         cargo[20:90, 85:115] = True
         final = {"LSP": [deck], "cargo": [cargo]}
         self.assertFalse(verify_cargo_masks({"LSP": [deck], "cargo": []}, final, polygon, size)["passed"])
 
-    def test_rejects_a_sheet_narrower_than_the_shared_edge(self):
-        size = (120, 110)
-        polygon = [[20, 50], [80, 50], [80, 95], [20, 95]]
-        narrow = polygon_mask(size, [[35, 50], [80, 50], [80, 95], [35, 95]])
-        measured = verify_sheet_masks({"LSP": [], "cargo": []}, {"LSP": [narrow], "cargo": []}, polygon, size)
-        self.assertLess(measured["shared_edge_cover"], .8)
-        self.assertTrue(any("shared edge" in f for f in measured["failures"]))
+    def test_equal_sheet_touching_the_front_edge_passes(self):
+        measured = measure(rect(20, 10, 114, 101), rect(20, 102, 114, 193))
+        self.assertTrue(measured["passed"], measured["failures"])
+        self.assertLess(abs(measured["angle_deg"]), 1)
+        self.assertAlmostEqual(measured["width_ratio"], 1, delta=.05)
+        self.assertAlmostEqual(measured["depth_ratio"], 1, delta=.05)
+        self.assertLess(abs(measured["gap_m"]), .05)
+        self.assertLess(abs(measured["lateral_m"]), .05)
+        self.assertEqual(measured["old_depth_source"], "measured")
+        self.assertEqual(len(measured["new_rect_px"]), 4)
 
-    def test_unrelated_parked_lsp_mask_drift_does_not_fail_new_sheet(self):
-        size = (120, 110)
-        polygon = [[20, 50], [80, 50], [80, 95], [20, 95]]
-        deck = polygon_mask(size, polygon)
-        parked = np.zeros(deck.shape, bool)
-        parked[2:30, 82:118] = True
-        source = {"LSP": [], "cargo": []}
-        candidate = {"LSP": [deck, parked], "cargo": []}
-        measured = verify_sheet_masks(source, candidate, polygon, size)
-        self.assertTrue(measured["passed"])
-        self.assertEqual(measured["outside_fraction"], 0)
+    def test_narrow_shifted_sheet_reports_width_and_lateral_offset(self):
+        measured = measure(rect(20, 10, 114, 101), rect(40, 102, 114, 193))
+        self.assertFalse(measured["passed"])
+        self.assertAlmostEqual(measured["width_ratio"], .8, delta=.05)
+        self.assertAlmostEqual(measured["lateral_m"], .2, delta=.03)
+        self.assertTrue(any("width" in f for f in measured["failures"]))
+        self.assertTrue(any("toward the right end" in f for f in measured["failures"]))
+
+    def test_gap_between_the_sheets_fails(self):
+        measured = measure(rect(20, 10, 114, 101), rect(20, 115, 114, 206))
+        self.assertAlmostEqual(measured["gap_m"], .28, delta=.03)
+        self.assertTrue(any("gap" in f for f in measured["failures"]))
+
+    def test_rotated_sheet_fails_on_orientation(self):
+        c, s = np.cos(np.radians(12)), np.sin(np.radians(12))
+        corners = [[-47, -46], [47, -46], [47, 46], [-47, 46]]
+        rotated = polygon_mask(SIZE, [[67 + x * c - y * s, 150 + x * s + y * c] for x, y in corners])
+        measured = measure(rect(20, 10, 114, 101), rotated)
+        self.assertAlmostEqual(abs(measured["angle_deg"]), 12, delta=2)
+        self.assertTrue(any("rotated" in f for f in measured["failures"]))
+
+    def test_occluded_original_depth_falls_back_to_calibration(self):
+        measured = measure(rect(20, 90, 114, 101), rect(20, 102, 114, 193))
+        self.assertEqual(measured["old_depth_source"], "calibration")
+        self.assertTrue(measured["passed"], measured["failures"])
+
+    def test_no_new_sheet_has_nothing_to_correct(self):
+        points, valid, floor, source, _ = scene(rect(20, 10, 114, 101), np.zeros((240, 140), bool))
+        measured = verify_sheet_geometry(source, source, Image.new("L", SIZE, 255), points, valid, floor, EDGE,
+                                         TOWARD, CALIBRATED)
+        self.assertFalse(measured["passed"])
+        self.assertIsNone(measured["new_rect_px"])
 
     def test_source_pixels_outside_edit_region_remain_exact(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -1,14 +1,17 @@
 """Turn a valid forklift frame into one reviewed two-LSP violation.
 
 Run: python -m synth.valid_to_violation <valid frame> [--reference-map work/catalogue3d/reference_maps/<stem>/reference_map.json]
-     [--contact-edge x1,y1,x2,y2] [--camera work/camera.json] [--calibration work/calibration.json] [--moge]
+     [--contact-edge x1,y1,x2,y2] [--camera work/camera.json] [--calibration work/calibration.json]
 
 Two edits on the real frame, each gated by code before a visual review:
 1. one EMPTY LSP: the front edge of the loaded sheet's top face is measured on the photo (or given), the equal
-   second sheet is projected from it with the camera calibration, an image model adds it, and the result is
-   composited back (original pixels outside a bounded region and on SAM3-protected objects). Code checks the raw
-   output's shape and drift, guide marks, the composite's integrity and SAM3 geometry (coverage, IoU, full width at
-   the shared edge, one instance, no cargo); then Astra scores realism on a close-up.
+   second sheet is projected from it with the camera calibration (the guide), an image model adds it, and the
+   result is composited back (original pixels outside a bounded region and on SAM3-protected objects). Code checks
+   the raw output's shape and drift, guide marks and the composite's integrity, then measures the new sheet against
+   the original with SAM3 masks and a MoGe point map of the candidate: orientation, width, depth, gap and lateral
+   offset on the floor plane (one new instance, no cargo); then Astra scores realism on a close-up. A failed
+   candidate that has a new sheet is not regenerated: the next attempt edits that candidate, with the measured
+   deviations and an overlay (target outline and where the sheet is now) as correction instructions.
 2. one CARGO on that sheet, starting every retry from the accepted sheet, with the same gates (support on the sheet,
    one instance, height, unchanged exposed deck).
 References (forklift, LSP, SKID, cargo) are appearance only; by default Step A crops (work/refs/index.json),
@@ -35,9 +38,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from synth.vision_geometry import (Sam3Masks, bbox, edit_region, guide_marks, moge_floor_diagnostic,
-                                   preserve_outside, raw_drift, source_edge, union, verify_cargo_masks,
-                                   verify_sheet_masks, verify_unchanged, zoom_pair)
+from synth.vision_geometry import (MogePoints, Sam3Masks, bbox, edit_region, guide_marks, preserve_outside, raw_drift,
+                                   source_edge, union, verify_cargo_masks, verify_sheet_geometry, verify_unchanged,
+                                   zoom_pair)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -260,6 +263,19 @@ def cargo_target_box(geometry: dict, camera_path: Path, size_m: list[float]) -> 
     return [int(px[:, 0].min()), int(px[:, 1].min()), int(px[:, 0].max()), int(px[:, 1].max())]
 
 
+def correction_overlay(candidate: Path, polygon: list[list[int]], new_rect_px: list[list[int]], path: Path) -> Path:
+    """The candidate with the target outline (orange) and the measured outline of the new sheet (magenta)."""
+    with Image.open(candidate) as image:
+        overlay = image.convert("RGB")
+    draw = ImageDraw.Draw(overlay)
+    draw.line([*map(tuple, polygon), tuple(polygon[0])], fill=(255, 170, 0), width=4)
+    draw.line([*map(tuple, new_rect_px), tuple(new_rect_px[0])], fill=(255, 0, 255), width=4)
+    draw.text((polygon[0][0], polygon[0][1] - 18), "orange = target, magenta = now - MEASUREMENT MARKS ONLY",
+              fill=(255, 255, 255))
+    overlay.save(path)
+    return path
+
+
 def image_shape_ok(source: Path, candidate: Path) -> bool:
     """The image model's RAW output keeps the source aspect ratio and a usable size (a composite always would)."""
     with Image.open(source) as original, Image.open(candidate) as edited:
@@ -290,7 +306,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="gpt-image-2.5-sunburst")
     parser.add_argument("--camera", type=Path, default=CAMERA, help="camera.json of the input's camera")
     parser.add_argument("--calibration", type=Path, default=CALIBRATION, help="calibration.json with lsp_measured_size_m")
-    parser.add_argument("--moge", action="store_true", help="also record a MoGe floor-plane diagnostic (not a gate)")
     parser.add_argument("--step-a-index", type=Path, default=INDEX)
     parser.add_argument("--reference-map", type=Path, help="Four selected reference images; overrides Step A index")
     parser.add_argument("--image-cli", type=Path, default=Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "skills/.system/imagegen/scripts/image_gen.py")
@@ -409,6 +424,11 @@ def summary_sheet(report: dict, path: Path, panel_height: int = 540) -> Path:
             continue
         passed = sum(bool(r.get("accepted")) for r in runs)
         lines.append((f"{name}: {len(runs)} attempt(s), {passed} accepted", (20, 20, 20), True))
+        shape = (runs[-1].get("checks") or {}).get("masks") or {}
+        if "angle_deg" in shape:
+            lines.append((f"  last LSP vs original: angle {shape['angle_deg']:+.1f} deg, width {shape['width_ratio']:.0%}, "
+                          f"depth {shape['depth_ratio']:.0%}, gap {shape['gap_m']:.2f} m, lateral {shape['lateral_m']:.2f} m",
+                          (20, 20, 20), False))
         scores = (runs[-1].get("aesthetic") or {}).get("scores") or {}
         if scores:
             lines.append(("  last realism scores: " + ", ".join(f"{k} {v}/5" for k, v in scores.items()), (20, 20, 20), False))
@@ -489,13 +509,10 @@ def main() -> int:
             edge, anchor_info = source_edge(source_masks, size, gray)
         report["anchor"] = {"contact_edge_px": edge, **anchor_info}
         save_report()
-        if getattr(args, "moge", False):
-            point_cache = ROOT / "work/vision_cache/moge" / f"{sha256(source)[:20]}.npz"
-            point_cache.parent.mkdir(parents=True, exist_ok=True)
-            report["moge"] = moge_floor_diagnostic(source, source_masks, point_cache)
         guide = make_geometry_guide(source, edge, work, camera_path=camera_path, calibration_path=calibration_path)
         geometry = json.loads((work / "geometry.json").read_text())
-        expected_width = float(json.loads(calibration_path.read_text())["lsp_measured_size_m"][0])
+        calibrated_size = [float(v) for v in json.loads(calibration_path.read_text())["lsp_measured_size_m"][:2]]
+        expected_width = calibrated_size[0]
         measured_width = float(geometry["original_contact_edge_width_m"])
         if not 0.75 * expected_width <= measured_width <= 1.25 * expected_width:
             raise RuntimeError(f"Source LSP edge width {measured_width:.2f}m differs from the calibrated "
@@ -509,7 +526,12 @@ def main() -> int:
 
         # ---- stage 1: one empty LSP ----
         sheet_region = edit_region(size, polygon, "sheet")
-        accepted_sheet = sheet_masks = None
+        # the floor every candidate keeps from the source: free floor outside the edit region
+        floor = (union(source_masks.get("floor", []), (size[1], size[0])) & ~np.logical_or.reduce(protected)
+                 & (np.asarray(sheet_region) == 0))
+        toward = np.mean(geometry["new_lsp_near_edge_px"], axis=0).round().astype(int).tolist()
+        moge = MogePoints(ROOT / "work/vision_cache/moge")
+        accepted_sheet = sheet_masks = last = None
         feedback = ""
         for attempt in ([0] if getattr(args, "reuse_sheet", None) else range(1, args.max_attempts + 1)):
             raw = None
@@ -517,6 +539,26 @@ def main() -> int:
                 candidate = args.reuse_sheet.resolve()
                 if not candidate.is_file():
                     raise RuntimeError(f"--reuse-sheet image is missing: {candidate}")
+            elif last is not None and last["result"]["checks"]["masks"].get("new_rect_px"):
+                # correct the last candidate instead of regenerating: code measured what is wrong with it
+                raw = work / f"sheet_raw_{attempt:02d}.png"
+                candidate = work / f"sheet_{attempt:02d}.png"
+                outline = last["result"]["checks"]["masks"]["new_rect_px"]
+                overlay = correction_overlay(last["candidate"], polygon, outline,
+                                             work / f"sheet_correction_{attempt:02d}.png")
+                prompt = ("Correct the added EMPTY LSP in Image 1 (the new sheet in front of the loaded one) and keep "
+                          "everything else exactly as it is in Image 1. Code measured both sheets on the floor plane "
+                          "(SAM3 masks and MoGe depth): " + "; ".join(last["result"]["failures"]) + ". "
+                          f"Target top corners in source pixels: {polygon} (orange in Image 2); the added sheet is "
+                          f"now at about {outline} (magenta in Image 2). Make it one sheet with the original's size "
+                          "and orientation, its rear edge touching the original's front edge "
+                          f"{edge} along its full width. The coloured lines in Image 2 are measurement marks only "
+                          "and must not appear in the photograph. " + APPEARANCE_ONLY)
+                count_call(report, f"image edit - correct LSP geometry ({editor_name})")
+                guided_edit(args, [last["candidate"], overlay, refs["LSP"], source],
+                            ["Image 1 current candidate to correct", "Image 2 measurement overlay",
+                             f"Image 3 {ref_name} LSP appearance", "Image 4 original valid source"], prompt, raw, work)
+                preserve_outside(source, raw, candidate, sheet_region, protected)
             else:
                 raw = work / f"sheet_raw_{attempt:02d}.png"
                 candidate = work / f"sheet_{attempt:02d}.png"
@@ -532,7 +574,9 @@ def main() -> int:
                              "Image 5 geometry guide"], prompt, raw, work)
                 preserve_outside(source, raw, candidate, sheet_region, protected)
             candidate_masks = segmenter.get(candidate, ("LSP", "cargo"))
-            measured = verify_sheet_masks(source_masks, candidate_masks, polygon, size)
+            points, valid = moge.get(candidate)
+            measured = verify_sheet_geometry(source_masks, candidate_masks, sheet_region, points, valid, floor, edge,
+                                             toward, calibrated_size)
             count_call(report, "visual review - LSP realism (Astra)")
             result = gate("sheet", source, raw, candidate, sheet_region, protected, measured, source, polygon,
                           refs["LSP"], args, work, attempt, "adding one empty LSP")
@@ -544,6 +588,7 @@ def main() -> int:
                 accepted_sheet, sheet_masks = candidate, candidate_masks
                 break
             feedback = "Fix these failures: " + "; ".join(result["failures"])
+            last = {"candidate": candidate, "result": result}
         if accepted_sheet is None:
             report["stopped_at"] = "sheet_geometry_or_realism"
             return 2

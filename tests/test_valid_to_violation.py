@@ -21,7 +21,7 @@ def args_for(root: Path, source: Path, output: Path, **extra) -> argparse.Namesp
     values = dict(input=source, output=output, max_attempts=1, editor="codex", model="unused",
                   step_a_index=root / "index.json", image_cli=root / "unused.py", codex_bin="codex",
                   contact_edge="20,50,80,50", reference_map=None, reuse_sheet=None, reuse_cargo=None,
-                  camera=root / "camera.json", calibration=root / "calibration.json", moge=False)
+                  camera=root / "camera.json", calibration=root / "calibration.json")
     values.update(extra)
     return argparse.Namespace(**values)
 
@@ -89,7 +89,8 @@ class ValidToViolationTests(unittest.TestCase):
                     pipeline.main()
             self.assertFalse((root / "out.png").exists())
 
-    def run_pipeline(self, root: Path, aesthetic: dict, drift_passes: bool = True):
+    def run_pipeline(self, root: Path, aesthetic: dict, drift_passes: bool = True, sheet_geometry=None,
+                     max_attempts: int = 1):
         source = root / "valid.png"
         Image.new("RGB", (120, 110), "gray").save(source)
         (root / "calibration.json").write_text(json.dumps({"lsp_measured_size_m": [1.9, 1.85]}))
@@ -99,7 +100,7 @@ class ValidToViolationTests(unittest.TestCase):
             Image.new("RGB", (20, 20), "white").save(ref)
             refs[category] = ref
         output = root / "final.png"
-        args = args_for(root, source, output)
+        args = args_for(root, source, output, max_attempts=max_attempts)
         calls = []
 
         class FakeSam3:
@@ -108,6 +109,13 @@ class ValidToViolationTests(unittest.TestCase):
 
             def get(self, _path, keys):
                 return {key: [] for key in keys}
+
+        class FakeMoge:
+            def __init__(self, _cache):
+                pass
+
+            def get(self, _path):
+                return None, None
 
         def fake_guide(_source, _edge, work, **_paths):
             guide = work / "geometry_guide.png"
@@ -119,7 +127,7 @@ class ValidToViolationTests(unittest.TestCase):
             return guide
 
         def fake_edit(_args, images, _roles, prompt, raw, _work):
-            calls.append((raw.name, images[0].name, prompt))
+            calls.append((raw.name, images[0].name, prompt, images))
             Image.new("RGB", (120, 110), "gray").save(raw)
 
         passed = {"passed": True, "failures": []}
@@ -130,7 +138,8 @@ class ValidToViolationTests(unittest.TestCase):
               mock.patch.object(pipeline, "Sam3Masks", FakeSam3),
               mock.patch.object(pipeline, "make_geometry_guide", side_effect=fake_guide),
               mock.patch.object(pipeline, "guided_edit", side_effect=fake_edit),
-              mock.patch.object(pipeline, "verify_sheet_masks", return_value=passed),
+              mock.patch.object(pipeline, "MogePoints", FakeMoge),
+              mock.patch.object(pipeline, "verify_sheet_geometry", side_effect=sheet_geometry or [passed] * 9),
               mock.patch.object(pipeline, "verify_cargo_masks", return_value=passed),
               mock.patch.object(pipeline, "image_shape_ok", return_value=True),
               mock.patch.object(pipeline, "raw_drift", return_value=drift),
@@ -145,7 +154,7 @@ class ValidToViolationTests(unittest.TestCase):
             code, output, calls, report = self.run_pipeline(Path(folder), SCORED)
             self.assertEqual(code, 0)
             self.assertTrue(output.is_file())
-            self.assertEqual([name for name, _, _ in calls], ["sheet_raw_01.png", "cargo_raw_01.png"])
+            self.assertEqual([name for name, *_ in calls], ["sheet_raw_01.png", "cargo_raw_01.png"])
             self.assertEqual(calls[1][1], "sheet_01.png")
             self.assertIn("appearance only", calls[0][2])
             self.assertTrue((Path(folder) / "work/out").glob("final_vision_*/sheet_zoom_01.png"))
@@ -156,6 +165,21 @@ class ValidToViolationTests(unittest.TestCase):
                                                "visual review - cargo realism (Astra)": 1})
             with Image.open(report["summary_image"]) as summary:   # input | output side by side, stats below
                 self.assertGreater(summary.width, 2 * 120)
+
+    def test_measured_sheet_is_corrected_on_the_candidate_not_regenerated(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            wrong = {"passed": False, "failures": ["the new LSP is rotated +12.0 deg relative to the original"],
+                     "new_rect_px": [[20, 60], [80, 55], [82, 98], [22, 102]], "angle_deg": 12.0, "width_ratio": 1.0,
+                     "depth_ratio": 1.0, "gap_m": 0.0, "lateral_m": 0.0}
+            right = {"passed": True, "failures": [], "new_rect_px": [[20, 50], [80, 50], [80, 95], [20, 95]]}
+            code, output, calls, report = self.run_pipeline(Path(folder), SCORED, sheet_geometry=[wrong, right],
+                                                            max_attempts=2)
+            self.assertEqual(code, 0)
+            self.assertEqual([name for name, *_ in calls], ["sheet_raw_01.png", "sheet_raw_02.png", "cargo_raw_01.png"])
+            self.assertEqual(calls[1][1], "sheet_01.png")                  # edits the failed candidate
+            self.assertEqual(calls[1][3][1].name, "sheet_correction_02.png")
+            self.assertIn("rotated +12.0 deg", calls[1][2])
+            self.assertIn("image edit - correct LSP geometry (Astra + imagegen)", report["calls"])
 
     def test_low_realism_score_stops_without_publishing(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

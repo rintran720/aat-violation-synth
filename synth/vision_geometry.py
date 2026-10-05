@@ -19,7 +19,7 @@ PROMPTS = {
     "cargo": ("stretch wrapped cargo", "box"),
     "floor": ("floor",),
 }
-GUIDE_COLOURS = ((0, 255, 70), (255, 170, 0))   # line colours of the geometry guide image
+GUIDE_COLOURS = ((0, 255, 70), (255, 170, 0), (255, 0, 255))   # line colours of the guide and correction images
 
 
 def union(masks: list[np.ndarray], shape: tuple[int, int]) -> np.ndarray:
@@ -209,42 +209,150 @@ def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int],
                   "lsp_bbox": box, "edge_observed": True}
 
 
-def moge_floor_diagnostic(source: Path, masks: dict[str, list[np.ndarray]], output: Path) -> dict:
-    """Infer the source point map once and fit a floor plane to free pixels."""
-    import torch
-    from moge.model.v2 import MoGeModel
+class MogePoints:
+    """MoGe-2 metric point map (camera frame, metres) and its validity per image, cached by file hash. The model
+    loads on first use and stays loaded for the next candidate."""
 
-    if output.exists():
-        with np.load(output) as saved:
+    def __init__(self, cache: Path):
+        self.cache = cache
+        self.model = None
+
+    def get(self, image_path: Path) -> tuple[np.ndarray, np.ndarray]:
+        path = self.cache / f"{hashlib.sha256(image_path.read_bytes()).hexdigest()[:20]}.npz"
+        if not path.exists():
+            import torch
+            from moge.model.v2 import MoGeModel
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            if self.model is None:
+                self.model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to(device).eval()
+            with Image.open(image_path) as image:
+                rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255
+            with torch.inference_mode():
+                inferred = self.model.infer(torch.tensor(rgb, device=device).permute(2, 0, 1),
+                                            resolution_level=9, use_fp16=device == "cuda")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(path, points=inferred["points"].cpu().numpy(),
+                                valid=inferred["mask"].cpu().numpy().astype(bool))
+        with np.load(path) as saved, Image.open(image_path) as image:
             points, valid = saved["points"], saved["valid"].astype(bool)
-    else:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to(device).eval()
-        with Image.open(source) as image:
-            rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255
-        with torch.inference_mode():
-            inferred = model.infer(torch.tensor(rgb, device=device).permute(2, 0, 1),
-                                   resolution_level=9, use_fp16=device == "cuda")
-        points = inferred["points"].cpu().numpy()
-        valid = inferred["mask"].cpu().numpy().astype(bool)
-        np.savez_compressed(output, points=points, valid=valid)
-        del model
-    floor = union(masks.get("floor", []), next(iter(masks["floor"])).shape if masks.get("floor") else valid.shape)
-    for key in ("forklift", "LSP", "cargo"):
-        floor &= ~union(masks.get(key, []), floor.shape)
-    if floor.shape != valid.shape:
-        floor = np.asarray(Image.fromarray(floor.astype(np.uint8) * 255).resize(
-            (valid.shape[1], valid.shape[0]), Image.Resampling.NEAREST)) > 127
-    floor &= valid
-    sample = points[floor][::max(1, int(floor.sum() / 25000))]
+            if points.shape[:2] != (image.height, image.width):
+                raise RuntimeError(f"MoGe point map {points.shape[:2]} does not match the image {image_path}")
+        return points, valid
+
+
+def floor_frame(points: np.ndarray, valid: np.ndarray, floor: np.ndarray) -> dict:
+    """Plane fitted to the free floor's MoGe points: origin, axes (two in the plane, then the normal towards the
+    camera) and the fit's residuals."""
+    sample = points[floor & valid]
     sample = sample[np.isfinite(sample).all(axis=1)]
     if len(sample) < 1000:
-        raise RuntimeError("MoGe/SAM3 found too few valid floor points")
-    centre = np.median(sample, axis=0)
-    _, _, vh = np.linalg.svd(sample - centre, full_matrices=False)
-    residual = np.abs((sample - centre) @ vh[-1])
-    return {"floor_points": len(sample), "median_floor_residual_m": float(np.median(residual)),
-            "p90_floor_residual_m": float(np.percentile(residual, 90)), "point_map": str(output)}
+        raise RuntimeError("MoGe/SAM3 found too few free floor points to measure the sheets")
+    sample = sample[::max(1, len(sample) // 25000)]
+    origin = np.median(sample, axis=0)
+    _, _, vh = np.linalg.svd(sample - origin, full_matrices=False)
+    normal = vh[-1] if float(vh[-1] @ -origin) > 0 else -vh[-1]      # the camera is at the origin
+    first = vh[0] - (vh[0] @ normal) * normal
+    first /= np.linalg.norm(first)
+    residual = np.abs((sample - origin) @ normal)
+    return {"origin": origin, "axes": np.stack([first, np.cross(normal, first), normal]),
+            "floor_points": len(sample), "median_floor_residual_m": round(float(np.median(residual)), 4),
+            "p90_floor_residual_m": round(float(np.percentile(residual, 90)), 4)}
+
+
+def on_floor(points: np.ndarray, valid: np.ndarray, mask: np.ndarray, frame: dict,
+             max_height: float = .3) -> np.ndarray:
+    """In-plane coordinates of a mask's points that lie on or just above the floor (a sheet, not cargo on it)."""
+    local = (points[mask & valid] - frame["origin"]) @ frame["axes"].T
+    local = local[np.isfinite(local).all(axis=1)]
+    return local[(local[:, 2] > -.1) & (local[:, 2] < max_height), :2]
+
+
+def point_on_floor(points: np.ndarray, valid: np.ndarray, pixel, frame: dict, radius: int = 4) -> np.ndarray:
+    x, y = int(pixel[0]), int(pixel[1])
+    window = np.zeros(valid.shape, bool)
+    window[max(0, y - radius):y + radius + 1, max(0, x - radius):x + radius + 1] = True
+    local = (points[window & valid] - frame["origin"]) @ frame["axes"].T
+    local = local[np.isfinite(local).all(axis=1)]
+    if not len(local):
+        raise RuntimeError(f"MoGe has no valid point near pixel {pixel}")
+    return np.median(local[:, :2], axis=0)
+
+
+SHEET_TOLERANCES = {"angle_deg": 5., "size_ratio": .10, "gap_m": .10, "lateral_m": .15}
+
+
+def compare_sheets(points: np.ndarray, valid: np.ndarray, floor: np.ndarray, old_mask: np.ndarray | None,
+                   edge_px: list[list[int]], toward_px, new_mask: np.ndarray, calibrated_size_m: list[float],
+                   tolerances: dict = SHEET_TOLERANCES) -> dict:
+    """Orientation, size and position of the new sheet against the original one, on the floor plane of one MoGe
+    point map (both sheets in the same map, so MoGe's scale cancels out).
+
+    The original's front edge (edge_px, the shared edge) gives the frame: x along it from edge_px[0] (its left end
+    in the image) to edge_px[1], y across it towards toward_px, where the new sheet belongs. The original's width is
+    the edge; its depth is measured behind the edge when visible, else it is the calibrated depth scaled by the
+    measured width (cargo usually hides most of a loaded sheet)."""
+    frame = floor_frame(points, valid, floor)
+    a, b = (point_on_floor(points, valid, pixel, frame) for pixel in edge_px)
+    old_width = float(np.linalg.norm(b - a))
+    ex = (b - a) / max(old_width, 1e-6)
+    ey = np.array([-ex[1], ex[0]])
+    if float((point_on_floor(points, valid, toward_px, frame) - a) @ ey) < 0:
+        ey = -ey
+
+    def edge_coords(xy: np.ndarray) -> np.ndarray:
+        return np.c_[(xy - a) @ ex, (xy - a) @ ey]
+
+    expected_depth = calibrated_size_m[1] * old_width / calibrated_size_m[0]
+    old_depth, depth_source = expected_depth, "calibration"
+    if old_mask is not None:
+        behind = -edge_coords(on_floor(points, valid, old_mask, frame))[:, 1]
+        behind = behind[behind > 0]
+        if len(behind) >= 50 and np.percentile(behind, 99) >= .9 * expected_depth:
+            old_depth, depth_source = float(np.percentile(behind, 99)), "measured"
+    result = {"old_width_m": round(old_width, 3), "old_depth_m": round(old_depth, 3), "old_depth_source": depth_source,
+              **{key: frame[key] for key in ("floor_points", "median_floor_residual_m", "p90_floor_residual_m")}}
+    new = edge_coords(on_floor(points, valid, new_mask, frame))
+    if len(new) < 50:
+        return {**result, "passed": False, "failures": ["the new LSP could not be measured on the floor plane"]}
+
+    import cv2
+    corners = cv2.boxPoints(cv2.minAreaRect(new.astype(np.float32)))
+    sides = [corners[1] - corners[0], corners[2] - corners[1]]
+    angles = [(np.degrees(np.arctan2(s[1], s[0])) + 90) % 180 - 90 for s in sides]
+    angle = float(min(angles, key=abs))                     # of the side closest to the shared edge
+    c, s = np.cos(np.radians(angle)), np.sin(np.radians(angle))
+    aligned = new @ np.array([[c, -s], [s, c]])             # rotated back by angle
+    low, high = np.percentile(aligned, 1, axis=0), np.percentile(aligned, 99, axis=0)
+    new_width, new_depth = float(high[0] - low[0]), float(high[1] - low[1])
+    gap = float(np.percentile(new[:, 1], 1))
+    lateral = float((np.percentile(new[:, 0], 1) + np.percentile(new[:, 0], 99)) / 2 - old_width / 2)
+    width_ratio, depth_ratio = new_width / old_width, new_depth / old_depth
+    failures = []
+    if float(np.median(new[:, 1])) <= 0:
+        failures.append("the new LSP is behind the original sheet's front edge, not in front of it")
+    if abs(angle) > tolerances["angle_deg"]:
+        failures.append(f"the new LSP is rotated {angle:+.1f} deg relative to the original sheet's front edge; it "
+                        f"must be parallel to it (within {tolerances['angle_deg']:.0f} deg)")
+    if abs(width_ratio - 1) > tolerances["size_ratio"]:
+        failures.append(f"the new LSP is {width_ratio:.0%} of the original's width along the shared edge "
+                        f"({new_width:.2f} m vs {old_width:.2f} m); it must be the same size")
+    if abs(depth_ratio - 1) > tolerances["size_ratio"]:
+        failures.append(f"the new LSP is {depth_ratio:.0%} of the original's depth across the shared edge "
+                        f"({new_depth:.2f} m vs {old_depth:.2f} m); it must be the same size")
+    if gap > tolerances["gap_m"]:
+        failures.append(f"there is a {gap:.2f} m gap between the sheets; the new LSP must touch the original's "
+                        "front edge")
+    elif gap < -tolerances["gap_m"]:
+        failures.append(f"the new LSP overlaps the original sheet by {-gap:.2f} m; it must start at the original's "
+                        "front edge")
+    if abs(lateral) > tolerances["lateral_m"]:
+        failures.append(f"the new LSP is shifted {abs(lateral):.2f} m toward the {'right' if lateral > 0 else 'left'} "
+                        "end of the shared edge; centre it on the original sheet")
+    return {**result, "angle_deg": round(angle, 2), "new_width_m": round(new_width, 3),
+            "new_depth_m": round(new_depth, 3), "width_ratio": round(width_ratio, 3),
+            "depth_ratio": round(depth_ratio, 3), "gap_m": round(gap, 3), "lateral_m": round(lateral, 3),
+            "passed": not failures, "failures": failures}
 
 
 def polygon_mask(size: tuple[int, int], points: list[list[int]]) -> np.ndarray:
@@ -376,53 +484,50 @@ def verify_unchanged(base: Path, candidate: Path, region: Image.Image,
             [f"{changed} protected/background pixels changed"], "changed_pixels": changed}
 
 
-def verify_sheet_masks(source: dict[str, list[np.ndarray]], candidate: dict[str, list[np.ndarray]],
-                       polygon: list[list[int]], size: tuple[int, int]) -> dict:
-    """One new LSP that fills the target polygon (coverage, IoU), spans the whole shared edge (the polygon's first
-    two points) and does not spill out of it; no cargo yet."""
-    target = polygon_mask(size, polygon)
-    source_lsp = union(source.get("LSP", []), target.shape)
-    # SAM3 can give different masks for unrelated parked LSPs even when their
-    # pixels are unchanged. Only instances intersecting the planned footprint
-    # can represent the newly added sheet.
-    new_instances = [mask for mask in candidate.get("LSP", [])
-                     if ((mask & ~source_lsp) & target).sum() > 1500]
-    added = union(new_instances, target.shape) & ~source_lsp
-    coverage = float((added & target).sum() / max(target.sum(), 1))
-    outside = float((added & ~target).sum() / max(added.sum(), 1))
-    iou = float((added & target).sum() / max((added | target).sum(), 1))
-    # The target strip along the shared edge must be covered end to end: a narrower or sideways-shifted sheet
-    # leaves part of it empty.
-    shared = np.asarray(polygon[:2], dtype=float)
-    depth = max(float(np.linalg.norm(np.asarray(polygon[2], dtype=float) - shared[1])), 1.)
-    d = shared[1] - shared[0]
-    n = np.array([-d[1], d[0]]) / max(float(np.linalg.norm(d)), 1e-6)
-    yy, xx = np.mgrid[0:target.shape[0], 0:target.shape[1]]
-    strip = target & (np.abs((xx - shared[0][0]) * n[0] + (yy - shared[0][1]) * n[1]) <= .2 * depth)
-    shared_cover = float((added & strip).sum() / max(strip.sum(), 1))
-    # A thin dark side wall may extend beyond the projected top polygon.
+def sheet_at_edge(masks: list[np.ndarray], edge_px: list[list[int]], band_px: float = 20) -> np.ndarray | None:
+    """The LSP instance with the most pixels within band_px of the edge segment (the original, loaded sheet)."""
+    a, b = np.asarray(edge_px, dtype=float)
+    d = b - a
+    best, count = None, 0
+    for mask in masks:
+        ys, xs = np.nonzero(mask)
+        t = np.clip(((xs - a[0]) * d[0] + (ys - a[1]) * d[1]) / max(float(d @ d), 1e-6), 0, 1)
+        near = int((np.hypot(xs - a[0] - t * d[0], ys - a[1] - t * d[1]) <= band_px).sum())
+        if near > count:
+            best, count = mask, near
+    return best
+
+
+def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[str, list[np.ndarray]],
+                          region: Image.Image, points: np.ndarray, valid: np.ndarray, floor: np.ndarray,
+                          edge_px: list[list[int]], toward_px, calibrated_size_m: list[float]) -> dict:
+    """One new LSP inside the edit region, no cargo yet, and the new sheet's orientation, size and position equal
+    to the original's on the floor plane (compare_sheets). new_rect_px is the new sheet's image outline (minimum
+    area rectangle of its mask) for a correction edit, None when there is no new sheet to correct."""
+    shape = valid.shape
+    inside = np.asarray(region) > 0
+    source_lsp = union(source.get("LSP", []), shape)
+    # SAM3 can give different masks for unrelated parked LSPs even when their pixels are unchanged; only
+    # instances with new pixels inside the edit region can be the added sheet.
+    new = [mask for mask in candidate.get("LSP", []) if ((mask & ~source_lsp) & inside).sum() > 1500]
     failures = []
-    if coverage < 0.6:
-        failures.append(f"SAM3 new LSP covers {coverage:.1%} of target; need >=60%")
-    if outside > 0.2:
-        failures.append(f"SAM3 new LSP outside target {outside:.1%}; need <=20%")
-    if iou < 0.5:
-        failures.append(f"SAM3 new LSP overlaps the target with IoU {iou:.2f}; need >=0.50")
-    if shared_cover < 0.85:   # the empty sheet is unoccluded: it must reach both ends of the shared edge
-        failures.append(f"new LSP covers {shared_cover:.1%} of the shared edge strip; it must span the original "
-                        "sheet's full width")
-    if added.sum() < 2500:
-        failures.append("SAM3 found too little new LSP area")
-    if len(new_instances) != 1:
-        failures.append(f"SAM3 found {len(new_instances)} new LSP instances; expected one")
-    # Source cargo remains on the original LSP; sheet stage adds none.
-    source_cargo = union(source.get("cargo", []), target.shape)
-    edited_cargo = union(candidate.get("cargo", []), target.shape)
-    new_cargo = edited_cargo & ~source_cargo
-    if (new_cargo & target).sum() > 1000:
+    if len(new) != 1:
+        failures.append(f"SAM3 found {len(new)} new LSP instances; expected one")
+    new_cargo = union(candidate.get("cargo", []), shape) & ~union(source.get("cargo", []), shape)
+    if (new_cargo & inside).sum() > 1000:
         failures.append("Cargo appeared before the cargo stage")
-    return {"passed": not failures, "failures": failures, "coverage": coverage, "iou": iou,
-            "shared_edge_cover": shared_cover, "outside_fraction": outside, "added_lsp_pixels": int(added.sum())}
+    result = {"new_lsp_instances": len(new), "new_rect_px": None}
+    if new:
+        import cv2
+        sheet = max(new, key=lambda mask: int(mask.sum())) & ~source_lsp
+        old = sheet_at_edge(source.get("LSP", []), edge_px)
+        result.update(compare_sheets(points, valid, floor, old, edge_px, toward_px, sheet, calibrated_size_m))
+        failures = result["failures"] + failures
+        ys, xs = np.nonzero(sheet)
+        box = cv2.boxPoints(cv2.minAreaRect(np.c_[xs, ys].astype(np.float32)))
+        result["new_rect_px"] = [[int(round(x)), int(round(y))] for x, y in box]
+    result.update({"passed": not failures, "failures": failures})
+    return result
 
 
 def verify_cargo_masks(sheet: dict[str, list[np.ndarray]], candidate: dict[str, list[np.ndarray]],
