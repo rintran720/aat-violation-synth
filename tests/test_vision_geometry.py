@@ -12,7 +12,7 @@ from synth.vision_geometry import (edit_region, guide_marks, polygon_mask, prese
 
 
 SCALE = .02                     # metres per pixel on the synthetic floor
-CALIBRATED = [1.9, 1.85]        # LSP width along the shared edge, depth across it
+DEPTH_TO_WIDTH = 1.85 / 1.9     # calibrated LSP depth over the width of the shared edge
 SIZE = (140, 240)               # image width, height
 EDGE = [[20, 101], [114, 101]]  # front edge of the original sheet's top face
 TOWARD = [67, 190]              # a pixel on the side where the new sheet belongs
@@ -40,7 +40,75 @@ def scene(old, new):
 def measure(old, new):
     points, valid, floor, source, candidate = scene(old, new)
     region = Image.new("L", SIZE, 255)
-    return verify_sheet_geometry(source, candidate, region, points, valid, floor, EDGE, TOWARD, CALIBRATED)
+    return verify_sheet_geometry(source, candidate, region, points, valid, floor, EDGE, TOWARD, DEPTH_TO_WIDTH)
+
+
+# ---- an exact point map of boxes on a floor seen by an oblique camera, like the CCTV views (22 deg at the sheets)
+VIEW = (960, 540)
+FOCAL, PITCH, CAMERA_HEIGHT = 900., np.radians(25), 4.
+RIGHT = np.array([1., 0, 0])
+FORWARD = np.array([0, np.cos(PITCH), -np.sin(PITCH)])
+DOWN = np.array([0, -np.sin(PITCH), -np.cos(PITCH)])
+EYE = np.array([0, 0, CAMERA_HEIGHT])
+OLD_BOX = ((-1.15, 10., 0.), (1.15, 11.85, .09))          # the loaded sheet, front edge at y = 10 m
+CARGO_BOX = ((-1.1, 10., .09), (1.1, 11.8, 1.6))          # its load, flush with the front edge
+
+
+def project(point):
+    local = np.array([RIGHT, DOWN, FORWARD]) @ (np.asarray(point, dtype=float) - EYE)
+    return [int(round(VIEW[0] / 2 + FOCAL * local[0] / local[2])), int(round(VIEW[1] / 2 + FOCAL * local[1] / local[2]))]
+
+
+def raycast(boxes):
+    """Camera-frame points (x right, y down, z forward, as MoGe gives) and the index of the box each pixel sees
+    (-1 for the floor)."""
+    ys, xs = np.mgrid[0:VIEW[1], 0:VIEW[0]]
+    rays = np.dstack([(xs - VIEW[0] / 2) / FOCAL, (ys - VIEW[1] / 2) / FOCAL, np.ones(xs.shape)])
+    world = rays @ np.array([RIGHT, DOWN, FORWARD])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        best = np.where(world[..., 2] < 0, -EYE[2] / world[..., 2], np.inf)      # the floor
+        label = np.full(xs.shape, -1)
+        for index, (low, high) in enumerate(boxes):
+            t0, t1 = (np.asarray(low) - EYE) / world, (np.asarray(high) - EYE) / world
+            near, far = np.minimum(t0, t1).max(axis=2), np.maximum(t0, t1).min(axis=2)
+            hit = (near < far) & (near > 0) & (near < best)
+            best, label = np.where(hit, near, best), np.where(hit, index, label)
+    return rays * best[..., None], np.isfinite(best), label
+
+
+def oblique(new_box):
+    """verify_sheet_geometry on the scene with a new sheet box in front of the loaded one."""
+    _, _, before = raycast([OLD_BOX, CARGO_BOX])
+    points, valid, after = raycast([OLD_BOX, CARGO_BOX, new_box])
+    source = {"LSP": [before == 0], "cargo": [before == 1]}
+    candidate = {"LSP": [after == 0, after == 2], "cargo": [after == 1]}
+    edge = [project((-1.15, 10, .09)), project((1.15, 10, .09))]
+    return verify_sheet_geometry(source, candidate, Image.new("L", VIEW, 255), points, valid,
+                                 (before == -1) & (after == -1) & valid, edge, project((0, 9, 0)), 1.85 / 2.3)
+
+
+class ObliqueViewTests(unittest.TestCase):
+    def test_equal_adjoining_sheet_passes_at_a_grazing_view(self):
+        measured = oblique(((-1.15, 8.15, 0), (1.15, 10., .09)))
+        self.assertTrue(measured["passed"], measured)
+        self.assertLess(abs(measured["gap_m"]), .05)
+        self.assertLess(abs(measured["lateral_m"]), .05)
+        self.assertAlmostEqual(measured["width_ratio"], 1, delta=.04)
+        self.assertAlmostEqual(measured["depth_ratio"], 1, delta=.04)
+        self.assertAlmostEqual(measured["old_width_m"], 2.3, delta=.05)
+
+    def test_gap_short_and_shifted_sheets_are_measured_in_metres(self):
+        gap = oblique(((-1.15, 7.85, 0), (1.15, 9.7, .09)))
+        self.assertAlmostEqual(gap["gap_m"], .3, delta=.05)
+        self.assertAlmostEqual(gap["depth_ratio"], 1, delta=.05)
+        short = oblique(((-1.15, 8.7, 0), (1.15, 10., .09)))
+        self.assertAlmostEqual(short["depth_ratio"], .7, delta=.05)
+        self.assertLess(abs(short["gap_m"]), .05)
+        shifted = oblique(((-.85, 8.15, 0), (1.45, 10., .09)))
+        self.assertAlmostEqual(shifted["lateral_m"], .3, delta=.05)
+        self.assertAlmostEqual(shifted["width_ratio"], 1, delta=.05)
+        for measured in (gap, short, shifted):
+            self.assertFalse(measured["passed"])
 
 
 class VisionGeometryTests(unittest.TestCase):
@@ -104,10 +172,48 @@ class VisionGeometryTests(unittest.TestCase):
         self.assertEqual(measured["old_depth_source"], "calibration")
         self.assertTrue(measured["passed"], measured["failures"])
 
+    def test_original_mask_below_its_top_edge_does_not_shorten_the_new_sheet(self):
+        # SAM3's mask of the original sheet also covers its side face and shadow, below the top-face edge; an
+        # adjoining new sheet hides those pixels and must still measure full depth with no gap
+        measured = measure(rect(20, 10, 114, 112), rect(20, 102, 114, 193))
+        self.assertTrue(measured["passed"], measured["failures"])
+        self.assertLess(abs(measured["gap_m"]), .05)
+        self.assertAlmostEqual(measured["depth_ratio"], 1, delta=.05)
+
+    def test_sheet_merged_with_the_original_by_sam3_is_cut_at_the_shared_edge(self):
+        old = rect(20, 10, 114, 101)
+        points, valid, floor, source, _ = scene(old, rect(20, 102, 114, 193))
+        merged = {"LSP": [rect(20, 10, 114, 193)], "cargo": []}
+        measured = verify_sheet_geometry(source, merged, Image.new("L", SIZE, 255), points, valid, floor, EDGE,
+                                         TOWARD, DEPTH_TO_WIDTH)
+        self.assertTrue(measured["passed"], measured["failures"])
+        self.assertAlmostEqual(measured["depth_ratio"], 1, delta=.05)
+
+    def test_calibrated_depth_follows_the_given_depth_to_width_ratio(self):
+        # the original is hidden behind its edge; a wide sheet type keeps the calibrated depth, not a scaled one
+        points, valid, floor, source, candidate = scene(rect(20, 90, 114, 101), rect(20, 102, 114, 177))
+        measured = verify_sheet_geometry(source, candidate, Image.new("L", SIZE, 255), points, valid, floor, EDGE,
+                                         TOWARD, 1.5 / 1.88)
+        self.assertEqual(measured["old_depth_source"], "calibration")
+        self.assertAlmostEqual(measured["old_depth_m"], 1.5, delta=.03)
+        self.assertTrue(measured["passed"], measured["failures"])
+
+    def test_edge_end_pixels_off_the_sheet_do_not_move_the_shared_edge(self):
+        # at a grazing view the pixel at an end of the edge shows the floor beside the sheet, 0.4 m further away
+        # (s_003: an exactly placed sheet measured a 0.23 m gap); the edge is located from pixels on the sheet
+        old, new = rect(20, 10, 114, 101), rect(20, 102, 114, 193)
+        points, valid, floor, source, candidate = scene(old, new)
+        for x, y in EDGE:
+            points[y - 4:y + 5, x - 4:x + 5, 1] -= .4
+        measured = verify_sheet_geometry(source, candidate, Image.new("L", SIZE, 255), points, valid, floor, EDGE,
+                                         TOWARD, DEPTH_TO_WIDTH)
+        self.assertLess(abs(measured["gap_m"]), .05)
+        self.assertTrue(measured["passed"], measured["failures"])
+
     def test_no_new_sheet_has_nothing_to_correct(self):
         points, valid, floor, source, _ = scene(rect(20, 10, 114, 101), np.zeros((240, 140), bool))
         measured = verify_sheet_geometry(source, source, Image.new("L", SIZE, 255), points, valid, floor, EDGE,
-                                         TOWARD, CALIBRATED)
+                                         TOWARD, DEPTH_TO_WIDTH)
         self.assertFalse(measured["passed"])
         self.assertIsNone(measured["new_rect_px"])
 

@@ -279,23 +279,53 @@ def point_on_floor(points: np.ndarray, valid: np.ndarray, pixel, frame: dict, ra
     return np.median(local[:, :2], axis=0)
 
 
+def edge_on_floor(points: np.ndarray, valid: np.ndarray, edge_px: list[list[int]], toward_px,
+                  frame: dict) -> tuple[np.ndarray, np.ndarray, float]:
+    """The shared edge on the floor plane: the floor position of edge_px[0], the unit direction to edge_px[1] and
+    the edge's length. Located from pixels along the edge, 1 px on the original sheet's side (its top face or the
+    cargo standing on it, both above the edge on the floor plane) and 5% in from the ends: the end pixels
+    themselves often show the floor beside the sheet, which at a grazing view lies decimetres further away."""
+    a, b = np.asarray(edge_px, dtype=float)
+    normal = np.array([-(b - a)[1], (b - a)[0]]) / max(float(np.linalg.norm(b - a)), 1e-6)
+    if float((np.asarray(toward_px, dtype=float) - a) @ normal) > 0:
+        normal = -normal                                    # towards the original sheet
+    t = np.linspace(.05, .95, 37)
+    px = np.round(a + t[:, None] * (b - a) + normal).astype(int)
+    px[:, 0] = px[:, 0].clip(0, valid.shape[1] - 1)
+    px[:, 1] = px[:, 1].clip(0, valid.shape[0] - 1)
+    ok = valid[px[:, 1], px[:, 0]]
+    if ok.sum() < 10:
+        raise RuntimeError("MoGe has too few valid points along the original sheet's front edge")
+    xy = ((points[px[ok, 1], px[ok, 0]] - frame["origin"]) @ frame["axes"].T)[:, :2]
+    centre, direction = _fit_line(xy)
+    slope, start = np.polyfit(t[ok], (xy - centre) @ direction, 1)     # floor position along the edge against t
+    if slope < 0:
+        direction, slope, start = -direction, -slope, -start
+    return centre + start * direction, direction, float(slope)
+
+
 SHEET_TOLERANCES = {"angle_deg": 5., "size_ratio": .10, "gap_m": .10, "lateral_m": .15}
 
 
 def compare_sheets(points: np.ndarray, valid: np.ndarray, floor: np.ndarray, old_mask: np.ndarray | None,
-                   edge_px: list[list[int]], toward_px, new_mask: np.ndarray, calibrated_size_m: list[float],
+                   edge_px: list[list[int]], toward_px, new_mask: np.ndarray, depth_to_width: float,
                    tolerances: dict = SHEET_TOLERANCES) -> dict:
     """Orientation, size and position of the new sheet against the original one, on the floor plane of one MoGe
     point map (both sheets in the same map, so MoGe's scale cancels out).
 
     The original's front edge (edge_px, the shared edge) gives the frame: x along it from edge_px[0] (its left end
     in the image) to edge_px[1], y across it towards toward_px, where the new sheet belongs. The original's width is
-    the edge; its depth is measured behind the edge when visible, else it is the calibrated depth scaled by the
-    measured width (cargo usually hides most of a loaded sheet)."""
-    frame = floor_frame(points, valid, floor)
-    a, b = (point_on_floor(points, valid, pixel, frame) for pixel in edge_px)
-    old_width = float(np.linalg.norm(b - a))
-    ex = (b - a) / max(old_width, 1e-6)
+    the edge; its depth is measured behind the edge when visible, else it is depth_to_width times that width (cargo
+    usually hides most of a loaded sheet): the calibrated depth over the edge's width as the calibrated camera
+    measures it, which is the depth the geometry guide draws, free of MoGe's scale."""
+    # the floor around the sheets: MoGe's floor is not one plane over a wide-angle frame (s_003: 8 cm median
+    # residual over the whole floor, 1 cm within 250 px), and the height filter of on_floor needs the local one
+    yy, xx = np.mgrid[0:valid.shape[0], 0:valid.shape[1]]
+    middle = np.mean(edge_px, axis=0)
+    radius = max(250., 1.5 * float(np.linalg.norm(np.subtract(edge_px[1], edge_px[0]))))
+    nearby = floor & (np.hypot(xx - middle[0], yy - middle[1]) < radius)
+    frame = floor_frame(points, valid, nearby if (nearby & valid).sum() >= 1000 else floor)
+    a, ex, old_width = edge_on_floor(points, valid, edge_px, toward_px, frame)
     ey = np.array([-ex[1], ex[0]])
     if float((point_on_floor(points, valid, toward_px, frame) - a) @ ey) < 0:
         ey = -ey
@@ -303,7 +333,7 @@ def compare_sheets(points: np.ndarray, valid: np.ndarray, floor: np.ndarray, old
     def edge_coords(xy: np.ndarray) -> np.ndarray:
         return np.c_[(xy - a) @ ex, (xy - a) @ ey]
 
-    expected_depth = calibrated_size_m[1] * old_width / calibrated_size_m[0]
+    expected_depth = depth_to_width * old_width
     old_depth, depth_source = expected_depth, "calibration"
     if old_mask is not None:
         behind = -edge_coords(on_floor(points, valid, old_mask, frame))[:, 1]
@@ -500,10 +530,15 @@ def sheet_at_edge(masks: list[np.ndarray], edge_px: list[list[int]], band_px: fl
 
 def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[str, list[np.ndarray]],
                           region: Image.Image, points: np.ndarray, valid: np.ndarray, floor: np.ndarray,
-                          edge_px: list[list[int]], toward_px, calibrated_size_m: list[float]) -> dict:
+                          edge_px: list[list[int]], toward_px, depth_to_width: float) -> dict:
     """One new LSP inside the edit region, no cargo yet, and the new sheet's orientation, size and position equal
     to the original's on the floor plane (compare_sheets). new_rect_px is the new sheet's image outline (minimum
-    area rectangle of its mask) for a correction edit, None when there is no new sheet to correct."""
+    area rectangle of its mask) for a correction edit, None when there is no new sheet to correct.
+
+    The new sheet is its SAM3 instance on the new side of the shared edge's line. It is not "instance minus the
+    original's mask": that mask also covers the original's side face and shadow below its top-face edge, pixels an
+    adjoining new sheet hides, and removing them measured a correct sheet as short with a gap (s_003: 68% depth,
+    0.31 m gap). The line cut also splits a new sheet that SAM3 merged with the original into one instance."""
     shape = valid.shape
     inside = np.asarray(region) > 0
     source_lsp = union(source.get("LSP", []), shape)
@@ -519,9 +554,15 @@ def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[s
     result = {"new_lsp_instances": len(new), "new_rect_px": None}
     if new:
         import cv2
-        sheet = max(new, key=lambda mask: int(mask.sum())) & ~source_lsp
+        a, b = np.asarray(edge_px, dtype=float)
+        normal = np.array([-(b - a)[1], (b - a)[0]])
+        if float((np.asarray(toward_px, dtype=float) - a) @ normal) < 0:
+            normal = -normal
+        yy, xx = np.mgrid[0:shape[0], 0:shape[1]]
+        new_side = (xx - a[0]) * normal[0] + (yy - a[1]) * normal[1] >= 0
+        sheet = max(new, key=lambda mask: int(mask.sum())) & new_side
         old = sheet_at_edge(source.get("LSP", []), edge_px)
-        result.update(compare_sheets(points, valid, floor, old, edge_px, toward_px, sheet, calibrated_size_m))
+        result.update(compare_sheets(points, valid, floor, old, edge_px, toward_px, sheet, depth_to_width))
         failures = result["failures"] + failures
         ys, xs = np.nonzero(sheet)
         box = cv2.boxPoints(cv2.minAreaRect(np.c_[xs, ys].astype(np.float32)))

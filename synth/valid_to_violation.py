@@ -511,8 +511,8 @@ def main() -> int:
         save_report()
         guide = make_geometry_guide(source, edge, work, camera_path=camera_path, calibration_path=calibration_path)
         geometry = json.loads((work / "geometry.json").read_text())
-        calibrated_size = [float(v) for v in json.loads(calibration_path.read_text())["lsp_measured_size_m"][:2]]
-        expected_width = calibrated_size[0]
+        expected_width, calibrated_depth = (float(v) for v in
+                                            json.loads(calibration_path.read_text())["lsp_measured_size_m"][:2])
         measured_width = float(geometry["original_contact_edge_width_m"])
         if not 0.75 * expected_width <= measured_width <= 1.25 * expected_width:
             raise RuntimeError(f"Source LSP edge width {measured_width:.2f}m differs from the calibrated "
@@ -576,7 +576,7 @@ def main() -> int:
             candidate_masks = segmenter.get(candidate, ("LSP", "cargo"))
             points, valid = moge.get(candidate)
             measured = verify_sheet_geometry(source_masks, candidate_masks, sheet_region, points, valid, floor, edge,
-                                             toward, calibrated_size)
+                                             toward, calibrated_depth / measured_width)
             count_call(report, "visual review - LSP realism (Astra)")
             result = gate("sheet", source, raw, candidate, sheet_region, protected, measured, source, polygon,
                           refs["LSP"], args, work, attempt, "adding one empty LSP")
