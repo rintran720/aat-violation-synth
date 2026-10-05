@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline Valid-to-Violation</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #5b6577; --line: #dde2ea;
+    --a: #2f6fdb; --a-soft: #e6eefc; --b: #0f8a6a; --b-soft: #e1f4ee; --c: #b8641b; --c-soft: #fbeedf;
+    --d: #7a4fc4; --d-soft: #efe8fb; --bad: #a33a3a; --bad-bg: #f9e3e3; --code: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12161c; --panel: #1b2029; --ink: #e6e9ee; --muted: #9aa4b4; --line: #2c3340;
+      --a: #7ea8f2; --a-soft: #1d2a42; --b: #5cc8a8; --b-soft: #16302a; --c: #e5a468; --c-soft: #33261a;
+      --d: #b79af0; --d-soft: #2a2140; --bad: #ef9a9a; --bad-bg: #3a1d1d; --code: #232a35;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12161c; --panel: #1b2029; --ink: #e6e9ee; --muted: #9aa4b4; --line: #2c3340;
+    --a: #7ea8f2; --a-soft: #1d2a42; --b: #5cc8a8; --b-soft: #16302a; --c: #e5a468; --c-soft: #33261a;
+    --d: #b79af0; --d-soft: #2a2140; --bad: #ef9a9a; --bad-bg: #3a1d1d; --code: #232a35;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 6px; }
+  h2 { font-size: 20px; margin: 40px 0 12px; }
+  h3 { font-size: 16px; margin: 0 0 6px; }
+  p { margin: 6px 0; }
+  ul, ol { margin: 6px 0; padding-left: 22px; }
+  li { margin: 3px 0; }
+  .lead { color: var(--muted); max-width: 780px; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 13px; overflow-wrap: anywhere; }
+  pre { background: var(--code); padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; margin: 8px 0; }
+  pre code { background: none; padding: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+
+  .flow { display: flex; flex-direction: column; gap: 0; margin-top: 16px; }
+  .step { border: 1px solid var(--line); border-left: 5px solid var(--a); background: var(--panel);
+          border-radius: 10px; padding: 12px 16px; }
+  .step .tag { font-weight: 700; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--a); }
+  .step.s1 { border-left-color: var(--b); } .step.s1 .tag { color: var(--b); }
+  .step.s2 { border-left-color: var(--c); } .step.s2 .tag { color: var(--c); }
+  .step.out { border-left-color: var(--d); } .step.out .tag { color: var(--d); }
+  .arrow { text-align: center; color: var(--muted); font-size: 18px; line-height: 1; padding: 4px 0; }
+  .loop { display: inline-block; margin-top: 6px; font-size: 13px; color: var(--muted);
+          border: 1px dashed var(--line); border-radius: 6px; padding: 3px 8px; }
+  .fail { display: inline-block; font-size: 12px; font-weight: 600; color: var(--bad); background: var(--bad-bg);
+          border-radius: 5px; padding: 1px 7px; margin-left: 6px; }
+
+  .attempt { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 10px; }
+  .attempt div { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 13.5px; }
+  .attempt b { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  @media (max-width: 760px) { .attempt { grid-template-columns: 1fr; } }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line);
+          border-radius: 10px; overflow: hidden; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--code); font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  tr:last-child td { border-bottom: none; }
+  .scroll { overflow-x: auto; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
+  .note { color: var(--muted); font-size: 13.5px; }
+  .prompt { white-space: pre-wrap; word-break: break-word; border-left: 4px solid var(--a); }
+  .prompt .var { color: var(--c); font-weight: 600; }
+  .prompt .fb { color: var(--bad); font-weight: 600; }
+  .seq { counter-reset: s; list-style: none; padding-left: 0; }
+  .seq > li { counter-increment: s; position: relative; padding-left: 34px; margin: 10px 0; }
+  .seq > li::before { content: counter(s); position: absolute; left: 0; top: 0; width: 24px; height: 24px;
+                      border-radius: 50%; background: var(--a-soft); color: var(--a); font-weight: 700;
+                      font-size: 13px; display: flex; align-items: center; justify-content: center; }
+  .sam { border-left: 4px solid var(--b); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Pipeline Valid-to-Violation</h1>
+  <p class="lead"><code>synth/valid_to_violation.py</code> biến một frame CCTV thật, hợp lệ (xe nâng chở một LSP có
+  hàng) thành một ảnh vi phạm hai LSP: thêm một LSP thứ hai cùng kích thước đặt phía trước tấm đang chở, rồi thêm một
+  cargo lên tấm mới đó. Mỗi lần mô hình ảnh chỉnh sửa, kết quả được ghép lại vào ảnh gốc và phải qua các gate bằng code
+  (hình học, toàn vẹn) cùng một bước chấm điểm thị giác thì mới được giữ. Gate nào trượt thì không bao giờ xuất ảnh.</p>
+
+  <pre><code>python -m synth.valid_to_violation &lt;valid frame&gt;
+    [--reference-map work/catalogue3d/reference_maps/&lt;stem&gt;/reference_map.json]
+    [--contact-edge x1,y1,x2,y2] [--camera work/camera.json] [--calibration work/calibration.json] [--moge]</code></pre>
+
+  <h2>Tổng quan</h2>
+  <div class="flow">
+    <div class="step">
+      <div class="tag">0 · Chuẩn bị</div>
+      <h3>Ảnh tham chiếu, phân đoạn, cạnh neo, geometry guide</h3>
+      <p>Chọn một ảnh tham chiếu ngoại hình cho mỗi lớp, phân đoạn ảnh gốc bằng SAM3, đo cạnh trước mặt trên của tấm
+      đang chở hàng, chiếu tấm thứ hai bằng hiệu chuẩn camera và vẽ guide.</p>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="step s1">
+      <div class="tag">Stage 1 · LSP trống</div>
+      <h3>Thêm một LSP trống tại polygon đã chiếu</h3>
+      <p>Chỉnh sửa ảnh → ghép vào vùng giới hạn → các gate bằng code → Astra chấm độ chân thực.</p>
+      <span class="loop">↻ tối đa <code>--max-attempts</code> lần (mặc định 3), lỗi được đưa vào prompt lần sau</span>
+      <span class="fail">trượt hết → exit 2, stopped_at = sheet_geometry_or_realism</span>
+    </div>
+    <div class="arrow">↓ tấm được chấp nhận trở thành ảnh nền</div>
+    <div class="step s2">
+      <div class="tag">Stage 2 · Cargo</div>
+      <h3>Thêm một cargo lên tấm mới</h3>
+      <p>Mỗi lần thử lại đều bắt đầu từ tấm đã được chấp nhận, không bao giờ từ một ứng viên cargo đã trượt. Cấu trúc
+      gate giống Stage 1, với các kiểm tra mask riêng cho cargo.</p>
+      <span class="loop">↻ tối đa <code>--max-attempts</code> lần</span>
+      <span class="fail">trượt hết → exit 2, stopped_at = cargo_support_or_realism</span>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="step out">
+      <div class="tag">Đầu ra</div>
+      <h3>Xuất ảnh + report + ảnh tóm tắt</h3>
+      <p>Ứng viên cargo được chấp nhận được lưu thành PNG đầu ra (exit 0). Dù kết quả thế nào, <code>report.json</code>
+      và <code>&lt;output stem&gt;_summary.png</code> đều được ghi.</p>
+    </div>
+  </div>
+
+  <h2>0 · Chuẩn bị</h2>
+  <div class="two">
+    <div class="panel">
+      <h3>Kiểm tra trước khi chạy</h3>
+      <ul>
+        <li>Ảnh đầu vào tồn tại, <code>--max-attempts ≥ 1</code>, đường dẫn đầu ra chưa tồn tại.</li>
+        <li><code>--editor codex</code> (mặc định): cần Codex CLI trên PATH. <code>--editor api</code>: cần thêm
+        imagegen CLI và <code>OPENAI_API_KEY</code>.</li>
+        <li>Thư mục làm việc: <code>work/out/&lt;output stem&gt;_vision_&lt;UTC timestamp&gt;/</code>.</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>Ảnh tham chiếu ngoại hình</h3>
+      <p>Mỗi lớp một ảnh: <code>forklift</code>, <code>LSP</code>, <code>SKID</code>, <code>cargo</code>:</p>
+      <ul>
+        <li><b>Mặc định:</b> crop Step A từ <code>work/refs/index.json</code>, chọn theo score × √diện tích; với LSP, ưu
+        tiên tấm đơn mỏng (tỉ lệ ≥ 2.5, diện tích ≥ 5000 px).</li>
+        <li><b><code>--reference-map</code>:</b> ảnh render catalogue khớp góc nhìn (ví dụ từ
+        <code>synth.catalogue_reference_map</code>). Nếu có <code>size_m</code> của cargo thì dùng để tính hộp 3D cho
+        cargo.</li>
+      </ul>
+      <p class="note">Ảnh tham chiếu chỉ dùng cho ngoại hình: prompt ghi rõ chúng không đúng tỉ lệ và không được sao
+      chép góc nhìn.</p>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:14px">
+    <h3>Hình học</h3>
+    <ol>
+      <li><b>Mask SAM3</b> của ảnh gốc cho <code>forklift, LSP, cargo, floor</code> (cache tại
+      <code>work/vision_cache/sam3</code>).</li>
+      <li><b>Cạnh neo</b>: <code>source_edge()</code> tìm LSP đang chở hàng ở giữa (dựa trên phần chồng lấn với cargo)
+      và đo cạnh trước mặt trên của nó trên ảnh. <code>--contact-edge</code> cho phép ghi đè.</li>
+      <li><b>MoGe tuỳ chọn</b> (<code>--moge</code>): ghi chẩn đoán mặt phẳng sàn vào report; không phải gate.</li>
+      <li><b>Phép chiếu</b> (<code>make_geometry_guide</code>): unproject hai đầu cạnh lên mặt phẳng
+      <code>z = lsp_thickness_m</code> bằng camera pinhole từ <code>camera.json</code>; dịch theo pháp tuyến của cạnh
+      một khoảng bằng chiều sâu tấm đã hiệu chuẩn (<code>lsp_measured_size_m[1]</code>), về phía camera; rồi chiếu
+      ngược lại. Kết quả là polygon mặt trên của tấm mới, dùng chung cạnh với tấm gốc.</li>
+      <li><b>Kiểm tra bề rộng</b>: cạnh đo được phải nằm trong ±25 % bề rộng hiệu chuẩn
+      (<code>lsp_measured_size_m[0]</code>), nếu không thì dừng và yêu cầu dùng <code>--contact-edge</code>.</li>
+      <li><b>Đầu ra</b>: <code>geometry_guide.png</code> (cạnh chung màu xanh lá, viền tấm mới màu cam) và
+      <code>geometry.json</code> (polygon pixel và toạ độ thế giới các góc tấm mới, dùng cho hộp cargo).</li>
+      <li><b>Mask bảo vệ</b>: hợp các mask forklift, cargo và LSP của ảnh gốc. Ảnh ghép không bao giờ thay đổi các
+      pixel này.</li>
+    </ol>
+  </div>
+
+  <h2>SAM3 hỗ trợ gì</h2>
+  <p>SAM3 là mô hình phân đoạn theo câu chữ: đưa vào một ảnh và một cụm từ, nó trả về các mask instance kèm điểm tin
+  cậy. Pipeline không dùng SAM3 để <i>sinh</i> ảnh mà để <b>đo</b>: biết vật nào nằm ở pixel nào, trên ảnh gốc và trên
+  mọi ứng viên. Toàn bộ nằm trong lớp <code>Sam3Masks</code> (<code>synth/vision_geometry.py</code>).</p>
+  <div class="two">
+    <div class="panel sam">
+      <h3>Cách gọi</h3>
+      <table>
+        <tr><th>Lớp</th><th>Cụm từ gửi SAM3</th></tr>
+        <tr><td><code>forklift</code></td><td>"forklift"</td></tr>
+        <tr><td><code>LSP</code></td><td>"black platform", "flat top of platform"</td></tr>
+        <tr><td><code>cargo</code></td><td>"stretch wrapped cargo", "box"</td></tr>
+        <tr><td><code>floor</code></td><td>"floor"</td></tr>
+      </table>
+      <ul style="margin-top:8px">
+        <li>Bỏ mask có score &lt; 0.5; nhị phân hoá mask ở ngưỡng 0.5.</li>
+        <li>Một lớp có nhiều cụm từ: mask nào chồng &gt; 70 % lên mask đã có thì coi là trùng và bỏ.</li>
+        <li>Cache theo SHA-256 của file ảnh: <code>work/vision_cache/sam3/&lt;hash&gt;/&lt;lớp&gt;.npz</code>. Chạy lại
+        cùng ảnh không tốn GPU.</li>
+      </ul>
+    </div>
+    <div class="panel sam">
+      <h3>Dùng ở đâu</h3>
+      <ol>
+        <li><b>Tìm tấm đang chở hàng</b> (<code>source_edge</code>): chọn cargo lớn hơn 45 × 45 px gần giữa khung nhất,
+        rồi chọn mask LSP trùng ngang ≥ 35 % bề rộng cargo và có đáy lệch ≤ 90 px so với đáy cargo.</li>
+        <li><b>Đo cạnh neo</b> (<code>top_face_edge</code>): mask LSP giới hạn vùng tìm; OpenCV LSD tìm đoạn thẳng trên
+        viền dưới của mask (lệch ngang ≤ 40°). Nếu thấy hai đường song song cách nhau 3–15 px (mép mặt trên và chỗ chạm
+        sàn) thì lấy đường trên. Hai đầu cạnh = phạm vi mask dọc theo đường đó. Không đo được thì dùng hàng thấp nhất
+        của mask.</li>
+        <li><b>Mask bảo vệ</b>: hợp mask forklift, cargo, LSP gốc; ảnh ghép giữ nguyên các pixel này.</li>
+        <li><b>Kiểm tra ứng viên</b>: chạy lại trên mỗi ứng viên cho <code>LSP, cargo</code>; so với mask của ảnh nền để
+        biết <i>cái gì mới xuất hiện</i> (xem phần Code so sánh).</li>
+        <li><b>MoGe</b> (tuỳ chọn): mask <code>floor</code> trừ các vật khác cho ra pixel sàn trống để fit mặt phẳng.</li>
+      </ol>
+    </div>
+  </div>
+  <p class="note" style="margin-top:8px">Vì SAM3 có thể cho mask khác nhau với những LSP đậu xa dù pixel không đổi,
+  code chỉ tính các instance LSP có &gt; 1500 px mới nằm trong polygon mục tiêu.</p>
+
+  <h2>Một lần thử (cả hai stage)</h2>
+  <div class="attempt">
+    <div><b>1 · Chỉnh sửa</b><code>guided_edit</code> gửi ≤ 5 ảnh và prompt (kèm lỗi lần trước) cho Astra + imagegen
+    hoặc image API. Kết quả thô: <code>*_raw_NN.png</code>.</div>
+    <div><b>2 · Ghép</b><code>preserve_outside</code> trộn ảnh thô vào ảnh nền chỉ trong một hình chữ nhật làm mềm
+    quanh polygon, khớp màu trên vành làm mềm; các vật được bảo vệ giữ nguyên pixel.</div>
+    <div><b>3 · Phân đoạn</b>SAM3 trên ứng viên cho <code>LSP, cargo</code>.</div>
+    <div><b>4 · Gate bằng code</b>Kích thước, drift, dấu guide, toàn vẹn và các kiểm tra mask riêng của stage.</div>
+    <div><b>5 · Đánh giá thị giác</b>Astra chấm ảnh cận cảnh trước/sau (<code>zoom_pair</code>); code quyết định dựa
+    trên điểm.</div>
+  </div>
+  <p class="note" style="margin-top:8px">Một lần thử chỉ được chấp nhận khi mọi gate bằng code và gate thị giác đều
+  qua. Nếu không, toàn bộ lỗi trở thành "Fix these failures: …" trong prompt lần sau. <code>--reuse-sheet</code> /
+  <code>--reuse-cargo</code> kiểm tra lại một ứng viên có sẵn (attempt 0) thay vì sinh mới; khi đó bỏ qua các kiểm tra
+  trên ảnh thô.</p>
+
+  <h2>Đầu vào của từng stage</h2>
+  <div class="scroll">
+  <table>
+    <tr><th></th><th>Stage 1 · LSP trống</th><th>Stage 2 · Cargo</th></tr>
+    <tr><td>Ảnh nền</td><td>Frame gốc</td><td>Tấm đã được chấp nhận</td></tr>
+    <tr><td>Ảnh gửi editor</td>
+      <td>1 ảnh gốc · 2 ref forklift · 3 ref LSP · 4 ref SKID · 5 geometry guide</td>
+      <td>1 tấm đã chấp nhận · 2 ảnh gốc · 3 ref LSP · 4 ref cargo · 5 geometry guide</td></tr>
+    <tr><td>Ý chính của prompt</td>
+      <td>Đúng một LSP TRỐNG tại polygon, phủ hết cạnh chung; không có cargo; không vẽ đường guide vào ảnh.</td>
+      <td>Đúng một cargo đứng thẳng, đủ kích thước, trong hộp mục tiêu, đáy nằm trên mặt tấm, trong footprint; hai đầu
+      chỗ nối hai tấm vẫn thấy được; có thể che phần hàng phía sau.</td></tr>
+    <tr><td>Vùng chỉnh sửa</td>
+      <td>Bbox polygon + 35 px hai bên, 30 px trên, 45 px dưới; làm mềm Gaussian 6 px</td>
+      <td>Bbox polygon + 55 px hai bên, 280 px trên, 55 px dưới (chừa chỗ cho chiều cao cargo)</td></tr>
+    <tr><td>Vùng bảo vệ</td>
+      <td>Xe nâng, cargo gốc, LSP gốc</td>
+      <td>Xe nâng; cargo và LSP gốc, trừ phần nằm trong hộp cargo dự kiến (cargo gần hơn có thể che chúng)</td></tr>
+    <tr><td>Ref khi đánh giá</td><td>Ref LSP</td><td>Ref cargo</td></tr>
+  </table>
+  </div>
+
+  <h3 style="margin-top:18px">Hộp mục tiêu của cargo</h3>
+  <ul>
+    <li><b>Chiếu 3D</b> (khi reference map có <code>size_m</code> của cargo): một hộp kích thước đó đặt ở giữa mặt trên
+    tấm mới, chiếu 8 góc qua camera → bbox trên ảnh.</li>
+    <li><b>Phương án dự phòng</b>: phóng theo bbox của hàng gốc (rộng × 0.9, cao × 1.05), đứng gần cạnh gần camera của
+    tấm mới và căn giữa polygon.</li>
+    <li>Chiều cao cargo tối thiểu được chấp nhận = 70 % chiều cao hộp.</li>
+  </ul>
+
+  <h2>Prompt từng bước</h2>
+  <p>Mỗi lần thử có hai lần gọi mô hình: một lần <b>chỉnh sửa ảnh</b> và một lần <b>Astra chấm điểm</b>. Prompt được
+  ghép từ các phần cố định và các biến tính từ hình học. Văn bản prompt gửi đi là tiếng Anh, giữ nguyên như trong code;
+  <span style="color:var(--c);font-weight:600">màu cam</span> là biến,
+  <span style="color:var(--bad);font-weight:600">màu đỏ</span> là phần phản hồi lỗi từ lần thử trước.</p>
+
+  <h3 style="margin-top:16px">Bước 1 · Lớp bọc chung (<code>guided_edit</code>)</h3>
+  <p>Trước prompt riêng của stage luôn có câu liệt kê vai trò từng ảnh theo thứ tự:</p>
+  <pre class="prompt">Use the supplied images in this order: Image 1 …; Image 2 …; Image 3 …; Image 4 …; Image 5 geometry guide. <span class="var">&lt;prompt của stage&gt;</span></pre>
+  <ul>
+    <li><b><code>--editor codex</code></b> (mặc định): gọi <code>codex exec -m gpt-6-astra -s workspace-write</code> với 5
+    ảnh đính kèm, và thêm lời dặn Astra tự gọi công cụ imagegen:
+    <pre class="prompt">Use image_gen.imagegen to EDIT Image 1. Pass these image paths as referenced_image_paths in the supplied order, transparent_background=false. <span class="var">&lt;câu trên&gt;</span> Save the generated result as a nonempty PNG at <span class="var">&lt;work&gt;/sheet_raw_NN.png</span>. Do not edit any other repository file or use Blender/3D compositing.</pre></li>
+    <li><b><code>--editor api</code></b>: gọi thẳng <code>image_gen.py edit --model gpt-image-2.5-sunburst --quality high
+    --size auto</code>, prompt ghi vào file <code>&lt;stem&gt;.prompt.txt</code>.</li>
+  </ul>
+  <p class="note">Prompt đầy đủ của mỗi lần thử được lưu ở <code>&lt;work&gt;/sheet_raw_NN.prompt.txt</code> /
+  <code>cargo_raw_NN.prompt.txt</code>.</p>
+
+  <h3 style="margin-top:16px">Bước 2 · Prompt Stage 1 (LSP trống)</h3>
+  <pre class="prompt">Add exactly one EMPTY LSP on the floor at the guide polygon. Do not add cargo. Match the <span class="var">{Step A | catalogue}</span> LSP appearance, the scene's perspective, the sheet thickness and the CCTV texture. Keep the original forklift, cargo and LSP intact. Coloured guide marks must not appear in the photograph. Target LSP top corners in source pixels: <span class="var">[[x,y] ×4]</span>. The shared rear edge is <span class="var">[[x1,y1],[x2,y2]]</span>; the new sheet spans its full width. The reference images show appearance only (colour, material, labels, film, texture); they are not to scale and their viewpoint and position must not be copied. Size and position come from the target coordinates given here. <span class="fb">Fix these failures: …</span></pre>
+  <ul>
+    <li>4 góc polygon và cạnh chung là toạ độ pixel thật, tính từ phép chiếu camera; ảnh 5 (guide) vẽ đúng các toạ độ đó.</li>
+    <li>Câu "appearance only" ngăn mô hình chép kích thước/góc nhìn của ảnh tham chiếu.</li>
+  </ul>
+
+  <h3 style="margin-top:16px">Bước 3 · Prompt Stage 2 (cargo)</h3>
+  <pre class="prompt">Add exactly ONE UPRIGHT, FULL-SIZE cargo like Image 4 on the new empty LSP. Do not make a small parcel or a flat stack. Its approximate bounding box is <span class="var">[x0,y0,x1,y1]</span> in the <span class="var">W×H</span> source image, with its bottom on the deck. Keep the cargo fully within the LSP footprint at the bottom, leave the two LSP junction side ends visible, and match lighting and contact shadow. The nearer cargo may naturally occlude the load behind it. Render a single coherent cargo surface without a triangular patch or dark strip at its bottom. Do not move either LSP, the forklift or the background. Geometry guide polygon: <span class="var">[[x,y] ×4]</span>. <span class="var">&lt;câu appearance only&gt;</span> <span class="fb">Fix these failures: …</span></pre>
+  <ul>
+    <li>Hộp <code>[x0,y0,x1,y1]</code> là hộp mục tiêu (chiếu 3D hoặc phương án dự phòng).</li>
+    <li>Các câu "triangular patch", "dark strip", "small parcel", "flat stack" là lỗi đã gặp ở các lần chạy trước, nay
+    được cấm trước.</li>
+  </ul>
+
+  <h3 style="margin-top:16px">Bước 4 · Phản hồi lỗi cho lần thử sau</h3>
+  <p>Nếu lần thử trượt, mọi chuỗi lỗi (từ code và từ Astra) được nối bằng <code>; </code> và gắn vào cuối prompt lần
+  sau, ví dụ:</p>
+  <pre class="prompt"><span class="fb">Fix these failures: SAM3 new LSP covers 48.2% of target; need &gt;=60%; new LSP covers 71.0% of the shared edge strip; it must span the original sheet's full width; contact_shadow scored 2/5; visual review did not accept; missing shadow under the near edge (bottom of the new sheet)</span></pre>
+  <p class="note">Mỗi lần thử vẫn sinh từ ảnh nền (ảnh gốc hoặc tấm đã chấp nhận), không sinh tiếp từ ứng viên đã trượt.</p>
+
+  <h3 style="margin-top:16px">Bước 5 · Prompt chấm điểm (Astra)</h3>
+  <p>Gọi <code>codex exec -m gpt-6-astra -s read-only --output-schema</code> với 3 ảnh: (1) ảnh cận cảnh trước | sau,
+  (2) toàn khung sau chỉnh sửa, (3) ảnh tham chiếu ngoại hình.</p>
+  <pre class="prompt">Image 1 is a close-up: left BEFORE, right AFTER <span class="var">{adding one empty LSP | adding one cargo on the new LSP}</span>. Image 2 is the full frame after the edit. Image 3 is an appearance reference. Score ONLY the realism of the added object in the AFTER close-up, 1 (fake) to 5 (indistinguishable from the CCTV footage): edges (blending, no halo or seam), lighting (matches the scene), texture (CCTV blur, noise, material like the reference), contact_shadow (grounded, plausible shadow). List every visible defect in issues with where it is. Do not judge geometry or object counts; code checks those. JSON only.</pre>
+  <p>Câu trả lời bị ép theo JSON schema:</p>
+  <pre><code>{ "scores":   { "edges": 1-5, "lighting": 1-5, "texture": 1-5, "contact_shadow": 1-5 },
+  "issues":   [ { "what": "...", "where": "..." } ],
+  "accepted": true | false,
+  "feedback": "..." }</code></pre>
+  <p class="note">Ảnh cận cảnh (<code>zoom_pair</code>) cắt quanh polygon (rộng thêm 0.6 × bề rộng mỗi bên, lên trên
+  1.6 × chiều cao) và phóng lên cao 512 px, vì ở toàn khung vật mới chỉ rộng vài trăm pixel và đường ghép không nhìn
+  thấy.</p>
+
+  <h2>Code so sánh như thế nào</h2>
+  <p>Mọi quyết định đạt/trượt là của code. Có ba loại so sánh: <b>pixel</b> (ảnh nền vs ảnh mới), <b>mask</b> (SAM3
+  của ảnh nền vs SAM3 của ứng viên, so với polygon mục tiêu) và <b>điểm số</b> (JSON của Astra vs ngưỡng).</p>
+
+  <h3 style="margin-top:16px">So sánh pixel</h3>
+  <ol class="seq">
+    <li><b>Kích thước ảnh thô</b> (<code>image_shape_ok</code>): |tỉ lệ ảnh thô − tỉ lệ ảnh gốc| / tỉ lệ gốc &lt; 1 %, và
+    ảnh thô ≥ 1024 × 576. Bắt trường hợp mô hình crop hoặc đổi khung.</li>
+    <li><b>Drift ảnh thô</b> (<code>raw_drift</code>): resize ảnh thô về kích thước gốc; trên vùng phải giữ nguyên (ngoài
+    vùng chỉnh sửa + mask bảo vệ), tính chênh lệch RGB trung bình mỗi pixel. Trượt nếu &gt; 8 % pixel lệch &gt; 30 hoặc
+    lệch trung bình &gt; 9. Đo <i>trước</i> khi ghép, vì ảnh ghép đã khôi phục các pixel này nên sẽ che mất lỗi.</li>
+    <li><b>Ghép</b> (<code>preserve_outside</code>, không phải gate): alpha = vùng chỉnh sửa làm mềm; trên mask bảo vệ
+    alpha = 0, làm mềm 2 px quanh chúng. Khớp màu: trên vành alpha 0.05–0.95, mỗi kênh tính gain = std(gốc)/std(mới)
+    (kẹp 0.8–1.25) và dịch trung bình, để mô hình đổi phơi sáng toàn ảnh không để lại khung viền.</li>
+    <li><b>Dấu guide</b> (<code>guide_marks</code>): đếm pixel trong vùng chỉnh sửa có màu gần (±45 mỗi kênh) xanh lá
+    (0,255,70) hoặc cam (255,170,0), trừ đi số đã có ở ảnh nền. Trượt nếu &gt; 40 px: mô hình đã vẽ guide vào ảnh.</li>
+    <li><b>Toàn vẹn</b> (<code>verify_unchanged</code>): ảnh ghép và ảnh nền phải cùng kích thước, và không một pixel nào
+    khác nhau ngoài vùng chỉnh sửa hay trên mask bảo vệ.</li>
+  </ol>
+
+  <h3 style="margin-top:16px">So sánh mask · Stage 1 (<code>verify_sheet_masks</code>)</h3>
+  <ol class="seq">
+    <li><b>Tách phần mới</b>: <code>target</code> = polygon mục tiêu. Instance LSP mới = mask LSP của ứng viên có
+    &gt; 1500 px vừa không thuộc LSP gốc vừa nằm trong target. <code>added</code> = hợp các instance đó trừ LSP gốc.</li>
+    <li><b>Độ phủ</b> = |added ∩ target| / |target| ≥ 60 %.</li>
+    <li><b>Tràn ra ngoài</b> = |added − target| / |added| ≤ 20 % (cho phép mặt bên tối của tấm lộ ra dưới polygon).</li>
+    <li><b>IoU</b> = |added ∩ target| / |added ∪ target| ≥ 0.50.</li>
+    <li><b>Phủ cạnh chung</b>: dải trong target cách cạnh chung ≤ 20 % chiều sâu polygon; added phải phủ ≥ 85 % dải này.
+    Bắt tấm bị hẹp hoặc lệch sang một bên (vẫn có thể đạt độ phủ chung).</li>
+    <li><b>Số lượng</b>: đúng 1 instance mới, và added ≥ 2500 px.</li>
+    <li><b>Chưa có cargo</b>: cargo mới (cargo ứng viên trừ cargo gốc) trong target ≤ 1000 px.</li>
+  </ol>
+
+  <h3 style="margin-top:16px">So sánh mask · Stage 2 (<code>verify_cargo_masks</code>)</h3>
+  <ol class="seq">
+    <li><b>Tách phần mới</b>: <code>added</code> = cargo của ứng viên trừ cargo của tấm đã chấp nhận; phải ≥ 2500 px.</li>
+    <li><b>Chiều cao</b>: chiều cao bbox của added ≥ 70 % chiều cao hộp mục tiêu.</li>
+    <li><b>Có đỡ</b>: lấy 12 hàng dưới cùng của added, điểm trung vị (x, y) của các pixel đó phải nằm trong polygon tấm
+    mới, tức cargo đứng trên tấm chứ không lơ lửng hay đứng trên sàn.</li>
+    <li><b>Số lượng</b>: đúng 1 instance cargo mới (&gt; 2000 px mới, đáy không cao hơn đỉnh polygon quá 20 px).</li>
+    <li><b>Tấm không bị đổi</b>: trên phần mặt tấm còn lộ (target trừ cargo ứng viên), mask LSP trước và sau XOR không
+    vượt quá 12 % diện tích LSP lộ ra. Bắt mô hình vẽ lại hoặc dịch tấm khi thêm cargo.</li>
+  </ol>
+
+  <h3 style="margin-top:16px">So sánh điểm số (<code>aesthetic_gate</code>)</h3>
+  <ul>
+    <li>Thiếu điểm hoặc điểm không phải số nguyên → trượt.</li>
+    <li>Mỗi điểm &lt; 3 → trượt, ghi "&lt;tiêu chí&gt; scored N/5".</li>
+    <li>Trung bình 4 điểm &lt; 3.5 → trượt.</li>
+    <li><code>accepted</code> của Astra khác true → trượt. Code và Astra phải đồng ý.</li>
+    <li>Chỉ khi trượt, danh sách <code>issues</code> mới được thêm vào lỗi để làm phản hồi; issues không tự làm trượt một
+    ảnh có điểm đạt.</li>
+  </ul>
+
+  <h2>Tóm tắt các gate</h2>
+  <div class="scroll">
+  <table>
+    <tr><th>Gate</th><th>Áp dụng cho</th><th>Qua khi</th></tr>
+    <tr><td>Kích thước ảnh thô</td><td>Ảnh thô</td><td>Tỉ lệ khung lệch ≤ 1 % so với ảnh gốc; tối thiểu 1024 × 576.</td></tr>
+    <tr><td>Drift ảnh thô</td><td>Ảnh thô</td><td>Ngoài vùng chỉnh sửa và trên các vật được bảo vệ: ≤ 8 % pixel thay đổi
+      &gt; 30 và chênh lệch RGB trung bình ≤ 9.</td></tr>
+    <tr><td>Dấu guide</td><td>Ảnh ghép</td><td>≤ 40 pixel mới mang màu đường guide trong vùng chỉnh sửa.</td></tr>
+    <tr><td>Toàn vẹn</td><td>Ảnh ghép</td><td>Không pixel nào thay đổi ngoài vùng chỉnh sửa và trên các vật được bảo vệ.</td></tr>
+    <tr><td>Mask tấm</td><td>Stage 1</td><td>Đúng một instance LSP mới; phủ polygon ≥ 60 %; nằm ngoài ≤ 20 %;
+      IoU ≥ 0.50; phủ ≥ 85 % dải cạnh chung; thêm ≥ 2500 px; không có cargo mới (&gt; 1000 px) trong polygon.</td></tr>
+    <tr><td>Mask cargo</td><td>Stage 2</td><td>Đúng một instance cargo mới; ≥ 2500 px; cao ≥ mức tối thiểu; tâm đáy
+      nằm trong footprint của tấm; mask LSP ở phần mặt tấm lộ ra thay đổi ≤ 12 %.</td></tr>
+    <tr><td>Độ chân thực</td><td>Ảnh cận cảnh</td><td>Astra chấm <code>edges, lighting, texture, contact_shadow</code>
+      (1–5): mọi điểm ≥ 3, trung bình ≥ 3.5, và <code>accepted</code> của Astra là true. Astra chỉ đánh giá độ chân
+      thực; hình học và số lượng do code kiểm tra. Các lỗi Astra liệt kê chỉ dùng cho lần thử lại.</td></tr>
+  </table>
+  </div>
+
+  <h2>Đầu ra</h2>
+  <div class="two">
+    <div class="panel">
+      <h3>Cạnh file đầu ra</h3>
+      <ul>
+        <li><code>&lt;input stem&gt;_violation.png</code> (hoặc <code>--output</code>): chỉ khi được chấp nhận, resize về
+        kích thước ảnh gốc.</li>
+        <li><code>&lt;output stem&gt;_summary.png</code>: luôn có. Ảnh đầu vào bên trái, ảnh đầu ra (hoặc ứng viên cuối,
+        ghi NOT ACCEPTED) bên phải; bên dưới: kết quả, số lần gọi mô hình theo mục đích, số lần thử mỗi stage, điểm và
+        lỗi gần nhất, ảnh tham chiếu, thời gian chạy.</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>Trong thư mục làm việc</h3>
+      <ul>
+        <li><code>report.json</code>: hash ảnh đầu vào, cạnh neo, hình học, ảnh tham chiếu, kiểm tra/điểm/lỗi của
+        từng lần thử, số lần gọi mô hình, kết quả, lỗi.</li>
+        <li><code>geometry_guide.png</code>, <code>geometry.json</code></li>
+        <li><code>sheet_raw_NN.png</code>, <code>sheet_NN.png</code>, <code>cargo_raw_NN.png</code>,
+        <code>cargo_NN.png</code>, ảnh zoom, prompt, phản hồi của Astra và log.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 style="margin-top:18px">Mã thoát</h3>
+  <ul>
+    <li><code>0</code>: được chấp nhận và đã xuất ảnh.</li>
+    <li><code>1</code>: lỗi (đầu vào sai, thiếu công cụ, lệnh thất bại, bề rộng cạnh bất hợp lý, …).</li>
+    <li><code>2</code>: chạy hết nhưng không ứng viên nào qua được một stage.</li>
+  </ul>
+</main>
+</body>
+</html>

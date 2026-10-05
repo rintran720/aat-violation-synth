@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valid-to-Violation Pipeline</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #5b6577; --line: #dde2ea;
+    --a: #2f6fdb; --a-soft: #e6eefc; --b: #0f8a6a; --b-soft: #e1f4ee; --c: #b8641b; --c-soft: #fbeedf;
+    --d: #7a4fc4; --d-soft: #efe8fb; --bad: #a33a3a; --bad-bg: #f9e3e3; --code: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12161c; --panel: #1b2029; --ink: #e6e9ee; --muted: #9aa4b4; --line: #2c3340;
+      --a: #7ea8f2; --a-soft: #1d2a42; --b: #5cc8a8; --b-soft: #16302a; --c: #e5a468; --c-soft: #33261a;
+      --d: #b79af0; --d-soft: #2a2140; --bad: #ef9a9a; --bad-bg: #3a1d1d; --code: #232a35;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12161c; --panel: #1b2029; --ink: #e6e9ee; --muted: #9aa4b4; --line: #2c3340;
+    --a: #7ea8f2; --a-soft: #1d2a42; --b: #5cc8a8; --b-soft: #16302a; --c: #e5a468; --c-soft: #33261a;
+    --d: #b79af0; --d-soft: #2a2140; --bad: #ef9a9a; --bad-bg: #3a1d1d; --code: #232a35;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 6px; }
+  h2 { font-size: 20px; margin: 40px 0 12px; }
+  h3 { font-size: 16px; margin: 0 0 6px; }
+  p { margin: 6px 0; }
+  ul, ol { margin: 6px 0; padding-left: 22px; }
+  li { margin: 3px 0; }
+  .lead { color: var(--muted); max-width: 780px; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 13px; overflow-wrap: anywhere; }
+  pre { background: var(--code); padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; margin: 8px 0; }
+  pre code { background: none; padding: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+
+  /* overview flow */
+  .flow { display: flex; flex-direction: column; gap: 0; margin-top: 16px; }
+  .step { border: 1px solid var(--line); border-left: 5px solid var(--a); background: var(--panel);
+          border-radius: 10px; padding: 12px 16px; }
+  .step .tag { font-weight: 700; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--a); }
+  .step.s1 { border-left-color: var(--b); } .step.s1 .tag { color: var(--b); }
+  .step.s2 { border-left-color: var(--c); } .step.s2 .tag { color: var(--c); }
+  .step.out { border-left-color: var(--d); } .step.out .tag { color: var(--d); }
+  .arrow { text-align: center; color: var(--muted); font-size: 18px; line-height: 1; padding: 4px 0; }
+  .loop { display: inline-block; margin-top: 6px; font-size: 13px; color: var(--muted);
+          border: 1px dashed var(--line); border-radius: 6px; padding: 3px 8px; }
+  .fail { display: inline-block; font-size: 12px; font-weight: 600; color: var(--bad); background: var(--bad-bg);
+          border-radius: 5px; padding: 1px 7px; margin-left: 6px; }
+
+  /* attempt loop */
+  .attempt { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 10px; }
+  .attempt div { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 13.5px; }
+  .attempt b { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  @media (max-width: 760px) { .attempt { grid-template-columns: 1fr; } }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line);
+          border-radius: 10px; overflow: hidden; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--code); font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  tr:last-child td { border-bottom: none; }
+  .scroll { overflow-x: auto; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
+  .note { color: var(--muted); font-size: 13.5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Valid-to-Violation Pipeline</h1>
+  <p class="lead"><code>synth/valid_to_violation.py</code> turns one real, valid CCTV frame (a forklift carrying one
+  loaded LSP) into one two-LSP violation: a second, equal LSP placed in front of the loaded one, then one cargo on
+  that new sheet. Every image-model edit is composited back onto the original and must pass code gates
+  (geometry, integrity) and a scored visual review before it is kept. A failed gate never publishes.</p>
+
+  <pre><code>python -m synth.valid_to_violation &lt;valid frame&gt;
+    [--reference-map work/catalogue3d/reference_maps/&lt;stem&gt;/reference_map.json]
+    [--contact-edge x1,y1,x2,y2] [--camera work/camera.json] [--calibration work/calibration.json] [--moge]</code></pre>
+
+  <h2>Overview</h2>
+  <div class="flow">
+    <div class="step">
+      <div class="tag">0 · Setup</div>
+      <h3>References, segmentation, anchor edge, geometry guide</h3>
+      <p>Pick one appearance reference per class, segment the source with SAM3, measure the front edge of the loaded
+      sheet's top face, project the second sheet with the camera calibration and draw the guide.</p>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="step s1">
+      <div class="tag">Stage 1 · Empty LSP</div>
+      <h3>Add one empty LSP at the projected polygon</h3>
+      <p>Image edit → composite into a bounded region → code gates → Astra realism score.</p>
+      <span class="loop">↻ up to <code>--max-attempts</code> (default 3), failures fed into the next prompt</span>
+      <span class="fail">all fail → exit 2, stopped_at = sheet_geometry_or_realism</span>
+    </div>
+    <div class="arrow">↓ accepted sheet becomes the base</div>
+    <div class="step s2">
+      <div class="tag">Stage 2 · Cargo</div>
+      <h3>Add one cargo on the new sheet</h3>
+      <p>Every retry starts from the accepted sheet, never from a failed cargo candidate. Same gate structure, with
+      cargo-specific mask checks.</p>
+      <span class="loop">↻ up to <code>--max-attempts</code></span>
+      <span class="fail">all fail → exit 2, stopped_at = cargo_support_or_realism</span>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="step out">
+      <div class="tag">Output</div>
+      <h3>Publish + report + summary image</h3>
+      <p>The accepted cargo candidate is saved as the output PNG (exit 0). Whatever the result, <code>report.json</code>
+      and a <code>&lt;output stem&gt;_summary.png</code> are written.</p>
+    </div>
+  </div>
+
+  <h2>0 · Setup</h2>
+  <div class="two">
+    <div class="panel">
+      <h3>Pre-flight checks</h3>
+      <ul>
+        <li>Input exists, <code>--max-attempts ≥ 1</code>, output path does not exist yet.</li>
+        <li><code>--editor codex</code> (default): the Codex CLI must be on PATH. <code>--editor api</code>: also needs
+        the imagegen CLI and <code>OPENAI_API_KEY</code>.</li>
+        <li>Work directory: <code>work/out/&lt;output stem&gt;_vision_&lt;UTC timestamp&gt;/</code>.</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>Appearance references</h3>
+      <p>One image each for <code>forklift</code>, <code>LSP</code>, <code>SKID</code>, <code>cargo</code>:</p>
+      <ul>
+        <li><b>Default:</b> Step A crops from <code>work/refs/index.json</code>, best score × √area; for LSP, prefer
+        single thin sheets (aspect ≥ 2.5, area ≥ 5000 px).</li>
+        <li><b><code>--reference-map</code>:</b> view-matched catalogue renders (e.g. from
+        <code>synth.catalogue_reference_map</code>). Its optional cargo <code>size_m</code> drives the 3D cargo box.</li>
+      </ul>
+      <p class="note">References are appearance only: the prompt states they are not to scale and their viewpoint
+      must not be copied.</p>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:14px">
+    <h3>Geometry</h3>
+    <ol>
+      <li><b>SAM3 masks</b> of the source for <code>forklift, LSP, cargo, floor</code> (cached in
+      <code>work/vision_cache/sam3</code>).</li>
+      <li><b>Anchor edge</b>: <code>source_edge()</code> finds the central loaded LSP (by cargo overlap) and measures
+      the front edge of its top face on the photo. <code>--contact-edge</code> overrides it.</li>
+      <li><b>Optional MoGe</b> (<code>--moge</code>): records a floor-plane diagnostic in the report; not a gate.</li>
+      <li><b>Projection</b> (<code>make_geometry_guide</code>): unproject both edge endpoints onto the plane
+      <code>z = lsp_thickness_m</code> using the pinhole camera from <code>camera.json</code>; offset them by the
+      calibrated sheet depth (<code>lsp_measured_size_m[1]</code>) along the edge normal, on the side toward the
+      camera; project back. This gives the new sheet's top polygon, sharing the edge with the original.</li>
+      <li><b>Width sanity check</b>: the measured edge must be within ±25 % of the calibrated width
+      (<code>lsp_measured_size_m[0]</code>), otherwise the run stops and asks for <code>--contact-edge</code>.</li>
+      <li><b>Outputs</b>: <code>geometry_guide.png</code> (green shared edge, orange new-sheet outline) and
+      <code>geometry.json</code> (pixel polygon plus the new sheet's world corners, used for the cargo box).</li>
+      <li><b>Protected masks</b>: union of the source's forklift, cargo and LSP masks. The composite never changes
+      these pixels.</li>
+    </ol>
+  </div>
+
+  <h2>One attempt (both stages)</h2>
+  <div class="attempt">
+    <div><b>1 · Edit</b><code>guided_edit</code> sends ≤ 5 images and a prompt (with last failures) to Astra + imagegen
+    or the image API. Raw result: <code>*_raw_NN.png</code>.</div>
+    <div><b>2 · Composite</b><code>preserve_outside</code> blends the raw edit into the base only inside a feathered
+    rectangle around the polygon, colour-matched on the feather ring; protected objects keep exact pixels.</div>
+    <div><b>3 · Segment</b>SAM3 on the candidate for <code>LSP, cargo</code>.</div>
+    <div><b>4 · Code gates</b>Shape, drift, guide marks, integrity and stage-specific mask checks.</div>
+    <div><b>5 · Visual review</b>Astra scores a before/after close-up (<code>zoom_pair</code>); code decides from the
+    scores.</div>
+  </div>
+  <p class="note" style="margin-top:8px">An attempt is accepted only when every code gate and the visual gate pass.
+  Otherwise all failure texts become "Fix these failures: …" in the next prompt. <code>--reuse-sheet</code> /
+  <code>--reuse-cargo</code> re-verify an existing candidate (attempt 0) instead of generating one; raw-output checks
+  are skipped for them.</p>
+
+  <h2>Stage inputs</h2>
+  <div class="scroll">
+  <table>
+    <tr><th></th><th>Stage 1 · Empty LSP</th><th>Stage 2 · Cargo</th></tr>
+    <tr><td>Base image</td><td>Source frame</td><td>Accepted sheet</td></tr>
+    <tr><td>Images to editor</td>
+      <td>1 source · 2 forklift ref · 3 LSP ref · 4 SKID ref · 5 geometry guide</td>
+      <td>1 accepted sheet · 2 source · 3 LSP ref · 4 cargo ref · 5 geometry guide</td></tr>
+    <tr><td>Prompt essentials</td>
+      <td>Exactly one EMPTY LSP at the polygon, spanning the full shared edge; no cargo; no guide lines in the photo.</td>
+      <td>Exactly one upright, full-size cargo inside the target box, bottom on the deck, inside the footprint; both
+      sheet junction ends visible; may occlude the load behind.</td></tr>
+    <tr><td>Edit region</td>
+      <td>Polygon bbox + 35 px sides, 30 px top, 45 px bottom; Gaussian feather 6 px</td>
+      <td>Polygon bbox + 55 px sides, 280 px top, 55 px bottom (room for cargo height)</td></tr>
+    <tr><td>Protected</td>
+      <td>Forklift, original cargo, original LSP</td>
+      <td>Forklift; original cargo and LSP except inside the planned cargo box (the nearer cargo may occlude them)</td></tr>
+    <tr><td>Review reference</td><td>LSP ref</td><td>Cargo ref</td></tr>
+  </table>
+  </div>
+
+  <h3 style="margin-top:18px">Cargo target box</h3>
+  <ul>
+    <li><b>3D projection</b> (when the reference map gives cargo <code>size_m</code>): a box of that size centred on the
+    new sheet's top face, its 8 corners projected with the camera → image bbox.</li>
+    <li><b>Fallback</b>: scale the original load's bbox (width × 0.9, height × 1.05), standing near the new sheet's
+    near edge and centred on the polygon.</li>
+    <li>Minimum accepted cargo height = 70 % of the box height.</li>
+  </ul>
+
+  <h2>Gates</h2>
+  <div class="scroll">
+  <table>
+    <tr><th>Gate</th><th>Applies to</th><th>Passes when</th></tr>
+    <tr><td>Raw shape</td><td>Raw output</td><td>Aspect ratio within 1 % of the source; at least 1024 × 576.</td></tr>
+    <tr><td>Raw drift</td><td>Raw output</td><td>Outside the edit region and on protected objects: ≤ 8 % of pixels change
+      by &gt; 30 and mean RGB delta ≤ 9.</td></tr>
+    <tr><td>Guide marks</td><td>Composite</td><td>≤ 40 new pixels in the guide-line colours inside the region.</td></tr>
+    <tr><td>Integrity</td><td>Composite</td><td>Zero changed pixels outside the region and on protected objects.</td></tr>
+    <tr><td>Sheet masks</td><td>Stage 1</td><td>Exactly one new LSP instance; coverage of the polygon ≥ 60 %; ≤ 20 %
+      outside it; IoU ≥ 0.50; ≥ 85 % of the shared-edge strip covered; ≥ 2500 px added; no new cargo (&gt; 1000 px)
+      in the polygon.</td></tr>
+    <tr><td>Cargo masks</td><td>Stage 2</td><td>Exactly one new cargo instance; ≥ 2500 px; height ≥ the minimum;
+      bottom centre inside the sheet footprint; exposed deck LSP mask changes ≤ 12 %.</td></tr>
+    <tr><td>Visual realism</td><td>Close-up</td><td>Astra scores <code>edges, lighting, texture, contact_shadow</code>
+      (1–5): every score ≥ 3, mean ≥ 3.5, and Astra's <code>accepted</code> is true. Astra judges realism only;
+      geometry and counts are code's job. Listed issues only feed the retry.</td></tr>
+  </table>
+  </div>
+
+  <h2>Outputs</h2>
+  <div class="two">
+    <div class="panel">
+      <h3>Next to the output</h3>
+      <ul>
+        <li><code>&lt;input stem&gt;_violation.png</code> (or <code>--output</code>): only on acceptance, resized to the
+        source size.</li>
+        <li><code>&lt;output stem&gt;_summary.png</code>: always. Input left, output (or last candidate, marked NOT
+        ACCEPTED) right; below: result, model calls by purpose, attempts per stage, last scores and failures,
+        references, run time.</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>In the work directory</h3>
+      <ul>
+        <li><code>report.json</code>: input hash, anchor, geometry, references, every attempt's checks, scores and
+        failures, call counts, result, error.</li>
+        <li><code>geometry_guide.png</code>, <code>geometry.json</code></li>
+        <li><code>sheet_raw_NN.png</code>, <code>sheet_NN.png</code>, <code>cargo_raw_NN.png</code>,
+        <code>cargo_NN.png</code>, zooms, prompts, Astra responses and logs.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 style="margin-top:18px">Exit codes</h3>
+  <ul>
+    <li><code>0</code>: accepted and published.</li>
+    <li><code>1</code>: error (bad input, missing tool, failed command, implausible edge width, …).</li>
+    <li><code>2</code>: ran to completion but no candidate passed in a stage.</li>
+  </ul>
+</main>
+</body>
+</html>
