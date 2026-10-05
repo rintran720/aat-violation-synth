@@ -94,80 +94,128 @@ def _fit_line(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return centre, direction
 
 
-def top_face_edge(mask: np.ndarray, gray: np.ndarray, max_angle_deg: float = 40,
-                  max_side_px: float = 15) -> tuple[list[list[int]], dict] | None:
-    """Front edge of the LSP's TOP face, measured on the photo.
+def dominant_line(xs: np.ndarray, ys: np.ndarray, max_angle_deg: float = 40,
+                  tolerance_px: float = 1.5) -> tuple[float, float, np.ndarray] | None:
+    """The line y = offset + slope * x that most points lie on (RANSAC over pairs, then least squares on its
+    inliers), within max_angle_deg of horizontal: (slope, offset, inliers). None with fewer than 30 inliers."""
+    rng = np.random.default_rng(0)
+    best = None
+    for _ in range(300):
+        i, j = rng.choice(len(xs), 2, replace=False)
+        if abs(int(xs[i]) - int(xs[j])) < 20:
+            continue
+        slope = (ys[j] - ys[i]) / (xs[j] - xs[i])
+        if abs(np.degrees(np.arctan(slope))) > max_angle_deg:
+            continue
+        inliers = np.abs(ys[i] + slope * (xs - xs[i]) - ys) <= tolerance_px
+        if best is None or inliers.sum() > best.sum():
+            best = inliers
+    if best is None or best.sum() < 30:
+        return None
+    slope, offset = np.polyfit(xs[best], ys[best], 1)
+    return float(slope), float(offset), np.abs(offset + slope * xs - ys) <= tolerance_px
 
-    The lowest row of a SAM3 sheet mask is where the 9 cm side face meets the floor, but the geometry guide
-    projects at the top-face height, so the edge must be the top-face edge. OpenCV's line segment detector finds
-    segments on the lower outline of the mask (within max_angle_deg of horizontal, so slanted sheets work); when
-    two parallel lines a few pixels apart are found (top-face edge above, floor contact below) the upper one is
-    kept. Endpoints are the mask's extent along that line. Returns None when no edge is measurable."""
-    import cv2
-    from scipy.ndimage import binary_erosion, distance_transform_edt
 
+def floor_contact_edge(mask: np.ndarray, max_angle_deg: float = 40, tolerance_px: float = 1.5,
+                       max_gap_px: int = 6) -> list[list[int]] | None:
+    """Front bottom edge of a sheet's mask: the straight part of its lower outline, from one front corner to the
+    other (left first). On a sheet lying flat this is where the front side face meets the floor; under a sheet that
+    a forklift holds up it is the lower rim of the shadow, so it gives the sheet's extent, not its height. SAM3
+    rounds a mask's corners, so the ends are not where the outline leaves the line but where the mask ends within a
+    few pixels above it. None when the outline has no straight part of at least 30 px within max_angle_deg of
+    horizontal."""
+    columns = np.flatnonzero(mask.any(axis=0))
+    if len(columns) < 30:
+        return None
+    lowest = mask.shape[0] - 1 - np.argmax(mask[::-1, columns], axis=0)     # lowest mask row of each column
+    line = dominant_line(columns, lowest, max_angle_deg, tolerance_px)
+    if line is None:
+        return None
+    slope, offset, inliers = line
+    on_line = columns[inliers]
+    runs = np.split(on_line, np.flatnonzero(np.diff(on_line) > max_gap_px) + 1)
+    run = max(runs, key=len)                                                 # the straight part
+    if run[-1] - run[0] < 30:
+        return None
     ys, xs = np.nonzero(mask)
-    if len(xs) < 50:
-        return None
-    x0, x1, y0, y1 = int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1
-    band_top = y1 - max(12, int(.35 * (y1 - y0)))          # lower part of the sheet only
-    near = distance_transform_edt(~(mask & ~binary_erosion(mask))) <= 6
-    has = mask.any(axis=0)
-    lowest = np.where(has, mask.shape[0] - 1 - np.argmax(mask[::-1], axis=0), -1)   # lowest mask row per column
-    pad = 8
-    cx0, cy0 = max(0, x0 - pad), max(0, band_top - pad)
-    crop = gray[cy0:min(gray.shape[0], y1 + pad), cx0:min(gray.shape[1], x1 + pad)]
-    found = cv2.createLineSegmentDetector().detect(np.ascontiguousarray(crop, dtype=np.uint8))[0]
-    if found is None:
-        return None
-    points = []
-    for xa, ya, xb, yb in found.reshape(-1, 4) + [cx0, cy0, cx0, cy0]:
-        length = float(np.hypot(xb - xa, yb - ya))
-        angle = abs(np.degrees(np.arctan2(yb - ya, xb - xa))) % 180
-        if length < 12 or min(angle, 180 - angle) > max_angle_deg:
-            continue
-        mx, my = int(round((xa + xb) / 2)), int(round((ya + yb) / 2))
-        if my < band_top or not (0 <= my < mask.shape[0] and 0 <= mx < mask.shape[1]) or not near[my, mx]:
-            continue
-        if lowest[mx] < 0 or not 0 <= lowest[mx] - my <= max_side_px + 6:
-            continue   # not on the sheet's lower outline (e.g. where the cargo stands on the deck)
-        t = np.linspace(0, 1, max(2, int(length)))[:, None]
-        points.append(np.array([xa, ya]) + t * np.array([xb - xa, yb - ya]))   # one point per pixel = length weight
-    if not points or sum(len(p) for p in points) < 25:
-        return None
-    points = np.vstack(points)
-    centre, direction = _fit_line(points)
-    normal = np.array([-direction[1], direction[0]])
-    normal = normal if normal[1] >= 0 else -normal          # points down the image, towards the floor contact
-    offset = (points - centre) @ normal
-    split = None
-    if np.percentile(offset, 90) - np.percentile(offset, 10) > 4:
-        low, high = np.percentile(offset, 15), np.percentile(offset, 85)
-        upper = offset < (low + high) / 2
-        for _ in range(10):
-            upper = np.abs(offset - low) < np.abs(offset - high)
-            if upper.all() or not upper.any():
-                break
-            low, high = offset[upper].mean(), offset[~upper].mean()
-        if 20 <= upper.sum() < len(points) and 3 < high - low <= max_side_px:   # a side face, not another object
-            centre, direction = _fit_line(points[upper]); split = round(float(high - low), 1)
-    rel = np.c_[xs, ys] - centre
-    along = rel @ direction
-    across = np.abs(rel @ np.array([-direction[1], direction[0]]))
-    on_line = along[across <= 6]                            # mask pixels on the fitted line
-    if len(on_line) < 20:
-        return None
-    a, b = centre + on_line.min() * direction, centre + on_line.max() * direction
-    edge = [[int(round(a[0])), int(round(a[1]))], [int(round(b[0])), int(round(b[1]))]]
-    return edge, {"method": "lsd_top_face_edge", "edge_observed": True, "two_lines_px_apart": split,
-                  "edge_angle_deg": round(float(np.degrees(np.arctan2(direction[1], direction[0]))), 1),
-                  "lsd_points": int(len(points))}
+    above = offset + slope * xs - ys                                         # pixels above the line
+    band = np.unique(xs[(above >= -tolerance_px) & (above <= 4)])            # the slab's lowest 4 px
+    runs = np.split(band, np.flatnonzero(np.diff(band) > max_gap_px) + 1)
+    ends = next(r for r in runs if r[0] <= run[0] and r[-1] >= run[-1])      # ...out to its two corners
+    return [[int(x), int(round(offset + slope * x))] for x in (ends[0], ends[-1])]
 
 
-def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int],
-                gray: np.ndarray | None = None) -> tuple[list[list[int]], dict]:
-    """Find the central loaded LSP by cargo overlap and the front edge of its top face (top_face_edge, needs the
-    grey image); without it, or when no edge is measurable, the mask's lowest row (the floor contact)."""
+def side_face_height(mask: np.ndarray, gray: np.ndarray, contact: list[list[int]], thickness_px: float,
+                     min_step: float = 30) -> list[tuple[float, float, int] | None] | None:
+    """Height in pixels of a sheet's black front side face above the lower outline of its mask (contact), for the
+    left and the right half of the front: [(mean column, height, columns) or None, the same]. None when the photo
+    does not show the sheet's own top face above its front anywhere. The two halves are kept apart because a
+    forklift may hold one end of the sheet higher than the other: the shadow is then deeper at that end.
+
+    The rim of the side face is where the photo steps from the sheet's lighter top face down to the black side
+    face. Only columns where the top face is in view count: the mask continues above the step there. Under the
+    load the black band also ends in a step, but that one is the load's bottom edge, which sits further back
+    whenever the load does not reach the sheet's front. In each such column the highest step is the rim (lower
+    ones are fork pockets, labels, and the seam between the side face and the shadow under a sheet that a forklift
+    holds up); the height most columns of a half agree on wins. A step counts from min_step grey levels: the seam
+    under the side face reaches 15-30 on the cam01 samples, the rim under a visible top face 30-60. Shadow under a raised sheet is as black as the
+    side face and lies below it: it adds
+    to this height instead of moving the rim (s_003: 11 px, where the camera gives 7 px for the thickness).
+    Heights are searched from 0.5 to 1.8 times thickness_px, the camera's figure for the sheet's thickness: on a
+    dark top face the only clear step is the load's bottom edge further up (s_011: 21 px for a 9 px sheet)."""
+    from scipy.ndimage import uniform_filter1d
+
+    (x0, y0), (x1, y1) = contact
+    smooth = uniform_filter1d(gray.astype(np.float32), 5, axis=1)          # along the edge
+    heights = np.arange(max(1, int(.5 * thickness_px) - 1), int(max(10, 1.8 * thickness_px)) + 2)
+    rims = []
+    for x in range(x0 + 2, x1 - 1):
+        rows = int(round(np.interp(x, [x0, x1], [y0, y1]))) - heights
+        if rows.min() < 7 or rows.max() + 1 >= gray.shape[0]:
+            continue
+        step = smooth[rows - 1, x] - smooth[rows + 1, x]                   # brighter above, darker below
+        peak = np.flatnonzero((step[1:-1] >= min_step) & (step[1:-1] >= step[2:]) & (step[1:-1] >= step[:-2])) + 1
+        if not len(peak):
+            continue
+        top = rows[peak[-1]]                                               # the top of the black band
+        face = smooth[top - 6:top - 1, x].min() - smooth[top + 1, x] >= min_step   # a face above it, not a label
+        if face and mask[top - 4, x]:                                      # ...and it is the sheet's own
+            rims.append((x, heights[peak[-1]]))
+    halves = []
+    for side in (lambda x: x < (x0 + x1) / 2, lambda x: x >= (x0 + x1) / 2):
+        columns = np.array([x for x, _ in rims if side(x)])
+        values = np.array([h for x, h in rims if side(x)])
+        if len(values) < 12:                                               # too few columns to trust an end
+            halves.append(None)
+            continue
+        best = max(np.unique(values), key=lambda v: (np.abs(values - v) <= 1).sum())
+        near = np.abs(values - best) <= 1
+        halves.append((float(columns[near].mean()), float(values[near].mean()), int(near.sum())) if near.sum() >= 12
+                      else None)
+    return halves if any(halves) else None
+
+
+EVEN_PX = 1.5      # the black band under a sheet counts as equally high at both ends within this
+
+
+def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int], gray: np.ndarray,
+                lift) -> tuple[list[list[int]], dict]:
+    """Find the central loaded LSP by cargo overlap and the top front edge of that slab: the edge a second sheet
+    shares with it.
+
+    The edge is the lower outline of the mask between the front corners (floor_contact_edge) moved up by the height
+    of the black front side face measured on the photo (side_face_height). The lower outline alone is not enough:
+    a forklift holds the sheet a little off the floor, and the shadow under it reads as more side face (s_003:
+    10 px of black where the camera gives 7 px for the sheet's thickness). What gives the edge its direction
+    depends on that shadow (info["reference"]):
+    - "floor_line": the black band is equally high at both ends of the front (within EVEN_PX), so the sheet is
+      parallel to the lower outline, the cleanest line in the photo, and the edge is that outline moved up;
+    - "top_rim": the band differs between the ends (one end held higher), so the outline follows the shadow, not
+      the sheet, and the edge is the line through the rim measured at the two ends;
+    - "floor_line_one_end": the top face shows at one end only, so evenness cannot be checked; parallel is assumed.
+    lift(pixel) is the image position of the point one sheet thickness above the floor point seen at a pixel
+    (calibrated camera): it bounds the search, and it is the whole estimate only when the photo shows no rim (a
+    dark load on a dark sheet), which is less accurate."""
     width, height = image_size
     cargo = []
     for mask in masks.get("cargo", []):
@@ -180,6 +228,7 @@ def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int],
         raise RuntimeError("SAM3 found no suitable central cargo; supply --contact-edge")
     cargo_box = min(cargo)[1]
     candidates = []
+    floor = union(masks.get("floor", []), (height, width))
     for mask in masks.get("LSP", []):
         box = bbox(mask)
         if not box:
@@ -189,24 +238,41 @@ def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int],
             continue
         if abs(box[3] - cargo_box[3]) > 90:
             continue
+        contact = floor_contact_edge(mask)
+        if contact is None:
+            continue
+        # a sheet lies on the floor. SAM3's LSP prompts also return the flat tops of containers and of stacks,
+        # which have a side face below their front edge, not floor (most cam01 "LSP" masks, 2026-10-05).
+        xs = np.arange(contact[0][0], contact[1][0] + 1)
+        ys = np.round(np.interp(xs, [contact[0][0], contact[1][0]], [contact[0][1], contact[1][1]])).astype(int)
+        below = np.mean([floor[np.clip(ys + d, 0, height - 1), xs].mean() for d in (8, 12, 16)])
+        if below < .6:
+            continue
         score = overlap - abs(box[3] - cargo_box[3])
-        candidates.append((score, mask, box))
+        candidates.append((score, mask, box, contact))
     if not candidates:
-        raise RuntimeError("SAM3 did not isolate the loaded source LSP; supply --contact-edge")
-    _, mask, box = max(candidates, key=lambda item: item[0])
-    if gray is not None:
-        measured = top_face_edge(mask, gray)
-        if measured is not None:
-            edge, info = measured
-            return edge, {**info, "cargo_bbox": cargo_box, "lsp_bbox": box}
-    ys = np.flatnonzero(mask.any(axis=1))
-    rim = mask[max(int(ys[-1]) - 10, 0):int(ys[-1]) + 1]
-    xx = np.flatnonzero(rim.any(axis=0))
-    if len(xx) < 35:
-        raise RuntimeError("Source LSP front rim is too small or occluded; supply --contact-edge")
-    edge = [[int(xx[0]), int(ys[-1])], [int(xx[-1]), int(ys[-1])]]
-    return edge, {"method": "sam3_exposed_rim", "cargo_bbox": cargo_box,
-                  "lsp_bbox": box, "edge_observed": True}
+        raise RuntimeError("SAM3 did not isolate a loaded source LSP with its front bottom edge on the floor; "
+                           "supply --contact-edge")
+    _, mask, box, contact = max(candidates, key=lambda item: item[0])
+    lifted = [[int(v) for v in lift(point)] for point in contact]
+    thickness = float(np.mean([c[1] - e[1] for c, e in zip(contact, lifted)]))
+    info = {"floor_contact_px": contact, "thickness_px": round(thickness, 1), "cargo_bbox": cargo_box, "lsp_bbox": box}
+    halves = side_face_height(mask, gray, contact, thickness)
+    if halves is None:
+        return lifted, {"method": "floor_contact_lifted_by_thickness", "edge_observed": False, **info}
+    left, right = halves
+    if left and right and abs(left[1] - right[1]) > EVEN_PX:
+        reference = "top_rim"                               # height as a line through the two measured ends
+        slope = (right[1] - left[1]) / (right[0] - left[0])
+        heights = [left[1] + slope * (x - left[0]) for x, _ in contact]
+    else:
+        reference = "floor_line" if left and right else "floor_line_one_end"
+        measured = [half for half in halves if half]
+        heights = [sum(h * n for _, h, n in measured) / sum(n for _, _, n in measured)] * 2
+    edge = [[x, int(round(y - h))] for (x, _), (_, y), h in zip(lifted, contact, heights)]
+    return edge, {"method": "side_face_top", "edge_observed": True, "reference": reference,
+                  "side_face_px": [round(h, 1) for h in heights],
+                  "rim_columns": [half[2] if half else 0 for half in halves], **info}
 
 
 class MogePoints:
@@ -530,37 +596,56 @@ def sheet_at_edge(masks: list[np.ndarray], edge_px: list[list[int]], band_px: fl
     return best
 
 
-def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[str, list[np.ndarray]],
-                          region: Image.Image, points: np.ndarray, valid: np.ndarray, floor: np.ndarray,
-                          edge_px: list[list[int]], toward_px, depth_to_width: float) -> dict:
-    """One new LSP inside the edit region, no cargo yet, and the new sheet's orientation, size and position equal
-    to the original's on the floor plane (compare_sheets).
+def added_sheet(source: dict[str, list[np.ndarray]], candidate: dict[str, list[np.ndarray]], region: Image.Image,
+                edge_px: list[list[int]], toward_px) -> tuple[int, np.ndarray | None]:
+    """The number of new LSP instances in the candidate and the mask of the added sheet (None without one).
 
     The new sheet is its SAM3 instance on the new side of the shared edge's line. It is not "instance minus the
     original's mask": that mask also covers the original's side face and shadow below its top-face edge, pixels an
     adjoining new sheet hides, and removing them measured a correct sheet as short with a gap (s_003: 68% depth,
     0.31 m gap). The line cut also splits a new sheet that SAM3 merged with the original into one instance."""
-    shape = valid.shape
     inside = np.asarray(region) > 0
+    shape = inside.shape
     source_lsp = union(source.get("LSP", []), shape)
     # SAM3 can give different masks for unrelated parked LSPs even when their pixels are unchanged; only
     # instances with new pixels inside the edit region can be the added sheet.
     new = [mask for mask in candidate.get("LSP", []) if ((mask & ~source_lsp) & inside).sum() > 1500]
+    if not new:
+        return 0, None
+    a, b = np.asarray(edge_px, dtype=float)
+    normal = np.array([-(b - a)[1], (b - a)[0]])
+    if float((np.asarray(toward_px, dtype=float) - a) @ normal) < 0:
+        normal = -normal
+    yy, xx = np.mgrid[0:shape[0], 0:shape[1]]
+    new_side = (xx - a[0]) * normal[0] + (yy - a[1]) * normal[1] >= 0
+    return len(new), max(new, key=lambda mask: int(mask.sum())) & new_side
+
+
+def outline(mask: np.ndarray) -> list[list[int]]:
+    """The mask's convex outline as a few corner points (four for a sheet seen in perspective)."""
+    import cv2
+    ys, xs = np.nonzero(mask)
+    hull = cv2.convexHull(np.c_[xs, ys].astype(np.int32))
+    corners = cv2.approxPolyDP(hull, .02 * cv2.arcLength(hull, True), True)
+    return [[int(x), int(y)] for x, y in corners.reshape(-1, 2)]
+
+
+def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[str, list[np.ndarray]],
+                          region: Image.Image, points: np.ndarray, valid: np.ndarray, floor: np.ndarray,
+                          edge_px: list[list[int]], toward_px, depth_to_width: float) -> dict:
+    """One new LSP inside the edit region (added_sheet), no cargo yet, and the new sheet's orientation, size and
+    position equal to the original's on the floor plane (compare_sheets)."""
+    shape = valid.shape
+    inside = np.asarray(region) > 0
+    count, sheet = added_sheet(source, candidate, region, edge_px, toward_px)
     failures = []
-    if len(new) != 1:
-        failures.append(f"SAM3 found {len(new)} new LSP instances; expected one")
+    if count != 1:
+        failures.append(f"SAM3 found {count} new LSP instances; expected one")
     new_cargo = union(candidate.get("cargo", []), shape) & ~union(source.get("cargo", []), shape)
     if (new_cargo & inside).sum() > 1000:
         failures.append("Cargo appeared before the cargo stage")
-    result = {"new_lsp_instances": len(new)}
-    if new:
-        a, b = np.asarray(edge_px, dtype=float)
-        normal = np.array([-(b - a)[1], (b - a)[0]])
-        if float((np.asarray(toward_px, dtype=float) - a) @ normal) < 0:
-            normal = -normal
-        yy, xx = np.mgrid[0:shape[0], 0:shape[1]]
-        new_side = (xx - a[0]) * normal[0] + (yy - a[1]) * normal[1] >= 0
-        sheet = max(new, key=lambda mask: int(mask.sum())) & new_side
+    result = {"new_lsp_instances": count}
+    if sheet is not None:
         old = sheet_at_edge(source.get("LSP", []), edge_px)
         result.update(compare_sheets(points, valid, floor, old, edge_px, toward_px, sheet, depth_to_width))
         failures = result["failures"] + failures

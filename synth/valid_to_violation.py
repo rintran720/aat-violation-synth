@@ -6,8 +6,8 @@ Run: python -m synth.valid_to_violation <valid frame> [--reference-map work/cata
 
 Two edits on the real frame, each gated by code. For now geometry alone decides: the scored realism review by Astra
 runs only with --aesthetic-review, and then it gates too.
-1. one EMPTY LSP: the front edge of the loaded sheet's top face is measured on the photo (or given) and is the
-   whole guide: the image model adds an identical sheet along it and infers its depth from the scene. (The equal
+1. one EMPTY LSP: the top front edge of the loaded sheet (the upper rim of its black front side face, measured
+   on the photo; or given) is the whole guide: the image model adds an identical sheet along it and infers its depth from the scene. (The equal
    sheet projected with the camera calibration only bounds the edit region and places the cargo: its depth was not
    reliable enough to dictate.) The result is composited back (original pixels outside a bounded region and on
    SAM3-protected objects). Code checks the raw output's shape and drift, guide marks and the composite's
@@ -16,7 +16,8 @@ runs only with --aesthetic-review, and then it gates too.
    A failed candidate goes back to Astra with its measured deviations, as a reference image beside the prompt:
    the retry edits the source frame again and corrects them (editing the failed candidate itself made it worse).
 2. one CARGO on that sheet, starting every retry from the accepted sheet, with the same gates (support on the sheet,
-   one instance, height, unchanged exposed deck).
+   one instance, height, unchanged exposed deck). It works on the sheet as accepted (its SAM3 outline), not on the
+   projected one: the image model chose that sheet's depth.
 References (forklift, LSP, SKID, cargo) are appearance only; by default Step A crops (work/refs/index.json),
 or a --reference-map, e.g. from synth.catalogue_reference_map (view-matched renders of the 3D catalogue). When the
 map gives the cargo's size_m, the cargo's target box is the projection of that 3D box. A failed gate never publishes.
@@ -41,9 +42,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from synth.vision_geometry import (MogePoints, Sam3Masks, bbox, edit_region, guide_marks, preserve_outside, raw_drift,
-                                   source_edge, union, verify_cargo_masks, verify_sheet_geometry, verify_unchanged,
-                                   zoom_pair)
+from synth.vision_geometry import (MogePoints, Sam3Masks, added_sheet, bbox, edit_region, guide_marks, outline,
+                                   polygon_mask, preserve_outside, raw_drift, source_edge, union, verify_cargo_masks,
+                                   verify_sheet_geometry, verify_unchanged, zoom_pair)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -201,6 +202,10 @@ class Camera:
         local = self.matrix[:3, :3].T @ (np.asarray(point, dtype=float) - self.matrix[:3, 3])
         return (round(self.cx + self.fx * local[0] / -local[2]), round(self.cy - self.fy * local[1] / -local[2]))
 
+    def lift(self, pixel, height: float) -> tuple[int, int]:
+        """Image position of the point `height` above the floor point seen at pixel."""
+        return self.project(self.unproject(pixel, 0.) + np.array([0, 0, height]))
+
 
 def make_geometry_guide(source: Path, contact_edge: list[list[int]], work: Path,
                         camera_path: Path | None = None, calibration_path: Path | None = None) -> Path:
@@ -287,7 +292,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("input", type=Path, help="Valid CCTV image with one forklift-loaded LSP")
     parser.add_argument("--output", type=Path, help="Accepted PNG path; default work/out/<input>_violation.png")
     parser.add_argument("--max-attempts", type=int, default=3)
-    parser.add_argument("--contact-edge", help="Override the measured LSP front edge: x1,y1,x2,y2 in source pixels")
+    parser.add_argument("--contact-edge",
+                        help="Override the loaded LSP's top front edge: x1,y1,x2,y2 in source pixels")
     parser.add_argument("--reuse-sheet", type=Path, help="Reverify a previously generated empty LSP and continue with cargo")
     parser.add_argument("--reuse-cargo", type=Path, help="Reverify a previously generated cargo candidate after --reuse-sheet")
     parser.add_argument("--editor", choices=("codex", "api"), default="codex",
@@ -500,7 +506,9 @@ def main() -> int:
             edge = [[values[0], values[1]], [values[2], values[3]]]
             anchor_info = {"method": "manual_override", "edge_observed": False}
         else:
-            edge, anchor_info = source_edge(source_masks, size, gray)
+            camera = Camera(camera_path)
+            thickness = float(json.loads((ROOT / "config.json").read_text())["lsp_thickness_m"])
+            edge, anchor_info = source_edge(source_masks, size, gray, lambda pixel: camera.lift(pixel, thickness))
         report["anchor"] = {"contact_edge_px": edge, **anchor_info}
         save_report()
         guide = make_geometry_guide(source, edge, work, camera_path=camera_path, calibration_path=calibration_path)
@@ -578,6 +586,10 @@ def main() -> int:
             report["stopped_at"] = "sheet_geometry_or_realism"
             return 2
         report["accepted_sheet"] = str(accepted_sheet)
+        # the sheet as the image model drew it; the projected polygon only suggested where
+        sheet = added_sheet(source_masks, sheet_masks, sheet_region, edge, toward)[1]
+        sheet_outline = outline(sheet)
+        report["accepted_sheet_outline_px"] = sheet_outline
         save_report()
 
         # ---- stage 2: one cargo on the new sheet ----
@@ -592,12 +604,17 @@ def main() -> int:
                 original_cargo = [edge[0][0], edge[0][1] - width_guess, edge[1][0], edge[0][1]]
         cargo_size = reference_cargo_size(args)
         cargo_box = cargo_target_box(geometry, camera_path, cargo_size) if cargo_size else None
-        if cargo_box is not None:
+        sheet_rows, sheet_columns = np.nonzero(sheet)
+        if cargo_box is not None:   # projected on the calibrated sheet: move it with the sheet as drawn
+            projected_rows, projected_columns = np.nonzero(polygon_mask(size, polygon))
+            dx = round(float(sheet_columns.mean() - projected_columns.mean()))
+            dy = round(float(sheet_rows.mean() - projected_rows.mean()))
+            cargo_box = [cargo_box[0] + dx, cargo_box[1] + dy, cargo_box[2] + dx, cargo_box[3] + dy]
             report["cargo_target"] = {"method": "3d_box_projection", "size_m": cargo_size, "box_px": cargo_box}
-        else:   # no 3D size: scale the original load, standing on the new sheet's centre
+        else:   # no 3D size: scale the original load, its bottom a third of the sheet in from the near edge
             cargo_height = original_cargo[3] - original_cargo[1]
-            floor_y = round(sum(point[1] for point in geometry["new_lsp_near_edge_px"]) / 2) - 18
-            cargo_x = round(sum(point[0] for point in polygon) / 4) + 18
+            floor_y = int(sheet_rows.max() - round(.35 * (sheet_rows.max() - sheet_rows.min())))
+            cargo_x = round(float(sheet_columns[sheet_rows == floor_y].mean()))
             cargo_width = round((original_cargo[2] - original_cargo[0]) * 0.9)
             cargo_box = [cargo_x - cargo_width // 2, floor_y - round(cargo_height * 1.05), cargo_x + cargo_width // 2, floor_y]
             report["cargo_target"] = {"method": "scaled_original_cargo", "box_px": cargo_box}
@@ -608,7 +625,7 @@ def main() -> int:
         original_lsp_protected = protected[2].copy(); original_lsp_protected[occlusion] = False
         original_cargo_protected = protected[1].copy(); original_cargo_protected[occlusion] = False
         cargo_protected = [protected[0], original_lsp_protected, original_cargo_protected]
-        cargo_region = edit_region(size, polygon, "cargo")
+        cargo_region = edit_region(size, sheet_outline, "cargo")
         for attempt in ([0] if getattr(args, "reuse_cargo", None) else range(1, args.max_attempts + 1)):
             raw = None
             if attempt == 0:
@@ -624,8 +641,8 @@ def main() -> int:
                           "cargo fully within the LSP footprint at the bottom, leave the two LSP junction side ends "
                           "visible, and match lighting and contact shadow. The nearer cargo may naturally occlude the "
                           "load behind it. Render a single coherent cargo surface without a triangular patch or dark "
-                          "strip at its bottom. Do not move either LSP, the forklift or the background. Geometry guide "
-                          f"polygon: {polygon}. " + APPEARANCE_ONLY + " " + feedback)
+                          "strip at its bottom. Do not move either LSP, the forklift or the background. The new "
+                          f"LSP's outline in source pixels: {sheet_outline}. " + APPEARANCE_ONLY + " " + feedback)
                 count_call(report, f"image edit - add cargo ({editor_name})")
                 guided_edit(args, [accepted_sheet, source, refs["LSP"], refs["cargo"], guide],
                             ["Image 1 geometry-accepted empty LSP", "Image 2 original valid source",
@@ -633,11 +650,11 @@ def main() -> int:
                              "Image 5 geometry guide"], prompt, raw, work)
                 preserve_outside(accepted_sheet, raw, candidate, cargo_region, cargo_protected)
             candidate_masks = segmenter.get(candidate, ("LSP", "cargo"))
-            measured = verify_cargo_masks(sheet_masks, candidate_masks, polygon, size, min_height_px=min_height)
+            measured = verify_cargo_masks(sheet_masks, candidate_masks, sheet_outline, size, min_height_px=min_height)
             if args.aesthetic_review:
                 count_call(report, "visual review - cargo realism (Astra)")
             result = gate("cargo", accepted_sheet, raw, candidate, cargo_region, cargo_protected, measured, source,
-                          polygon, refs["cargo"], args, work, attempt, "adding one cargo on the new LSP")
+                          sheet_outline, refs["cargo"], args, work, attempt, "adding one cargo on the new LSP")
             report["stages"]["cargo"].append({"number": attempt, "candidate": str(candidate), **result})
             save_report()
             print(f"Cargo {'reuse' if attempt == 0 else f'{attempt}/{args.max_attempts}'}: "

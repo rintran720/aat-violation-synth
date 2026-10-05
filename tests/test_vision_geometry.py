@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from synth.vision_geometry import (edit_region, guide_marks, polygon_mask, preserve_outside, raw_drift,
-                                   top_face_edge, verify_cargo_masks, verify_sheet_geometry)
+from synth.vision_geometry import (added_sheet, edit_region, floor_contact_edge, guide_marks, outline, polygon_mask,
+                                   preserve_outside, raw_drift, source_edge, verify_cargo_masks, verify_sheet_geometry)
 
 
 SCALE = .02                     # metres per pixel on the synthetic floor
@@ -124,7 +124,6 @@ class VisionGeometryTests(unittest.TestCase):
         polygon = [[20, 50], [80, 50], [80, 95], [20, 95]]
         deck = polygon_mask(size, polygon)
         empty = np.zeros(deck.shape, bool)
-        source = {"LSP": [], "cargo": []}
         sheet = {"LSP": [deck], "cargo": []}
         cargo = empty.copy()
         cargo[20:90, 32:68] = True
@@ -216,6 +215,18 @@ class VisionGeometryTests(unittest.TestCase):
         self.assertLess(abs(measured["gap_m"]), .05)
         self.assertTrue(measured["passed"], measured["failures"])
 
+    def test_added_sheet_and_its_outline_give_the_real_footprint_for_the_cargo_stage(self):
+        old, new = rect(20, 10, 114, 112), rect(24, 102, 110, 180)      # the original's mask reaches below its edge
+        count, sheet = added_sheet({"LSP": [old], "cargo": []}, {"LSP": [old, new], "cargo": []},
+                                   Image.new("L", SIZE, 255), EDGE, TOWARD)
+        self.assertEqual(count, 1)
+        self.assertTrue((sheet == new).all())                           # not shortened by the original's mask
+        corners = outline(sheet)
+        self.assertEqual(len(corners), 4)
+        self.assertEqual({tuple(c) for c in corners}, {(24, 102), (110, 102), (110, 180), (24, 180)})
+        self.assertEqual(added_sheet({"LSP": [old], "cargo": []}, {"LSP": [old], "cargo": []},
+                                     Image.new("L", SIZE, 255), EDGE, TOWARD), (0, None))
+
     def test_no_new_sheet_fails_without_measurements(self):
         points, valid, floor, source, _ = scene(rect(20, 10, 114, 101), np.zeros((240, 140), bool))
         measured = verify_sheet_geometry(source, source, Image.new("L", SIZE, 255), points, valid, floor, EDGE,
@@ -254,24 +265,65 @@ class VisionGeometryTests(unittest.TestCase):
             self.assertTrue(guide_marks(base, same, region)["passed"])
             self.assertFalse(guide_marks(base, marked, region)["passed"])
 
-    def test_top_face_edge_keeps_the_upper_of_two_parallel_lines(self):
-        # a slanted dark sheet: top face, then a 6 px side face, on a light floor
-        image = Image.new("L", (300, 200), 200)
-        draw = ImageDraw.Draw(image)
-        top = [(60, 40), (240, 60), (230, 120), (50, 100)]
-        draw.polygon(top, fill=60)
-        draw.polygon([(50, 100), (230, 120), (230, 126), (50, 106)], fill=25)   # side face below the top edge
-        mask = np.zeros((200, 300), bool)
-        mask_im = Image.new("L", (300, 200))
-        ImageDraw.Draw(mask_im).polygon([(60, 40), (240, 60), (230, 126), (50, 106)], fill=255)
-        mask[np.asarray(mask_im) > 0] = True
-        edge, info = top_face_edge(mask, np.asarray(image))
+    def test_floor_contact_edge_ends_at_the_two_front_corners(self):
+        # a slab seen obliquely: slanted front bottom edge from (50, 106) to (230, 126); the sides go up from there
+        slab = polygon_mask((300, 200), [[70, 40], [250, 60], [230, 126], [50, 106]])
+        (x0, y0), (x1, y1) = floor_contact_edge(slab)
+        self.assertLess(abs(x0 - 50) + abs(y0 - 106), 5)
+        self.assertLess(abs(x1 - 230) + abs(y1 - 126), 5)
+        self.assertIsNone(floor_contact_edge(polygon_mask((300, 200), [[10, 10], [30, 10], [30, 190], [10, 190]])))
+
+    def carried_sheet(self, above_is_dark=False, shadow=(5, 5)):
+        """A loaded sheet that a forklift holds off the floor: its top front edge runs from (60, 100) to
+        (240, 110), the black side face is 7 px high, and the shadow under it, as black as the side face, adds
+        shadow[0] px at the left end growing to shadow[1] px at the right end. A label sits on the side face. Left
+        and right of the load the lighter top face shows. Returns masks and the grey image."""
+        yy, xx = np.mgrid[0:200, 0:300]
+        top = 100 + (xx - 60) * 10 / 180                              # the top front edge
+        span = (xx >= 60) & (xx <= 240)
+        black = span & (yy >= top) & (yy < top + 7 + shadow[0] + (shadow[1] - shadow[0]) * (xx - 60) / 180)
+        cargo = (xx >= 80) & (xx <= 200) & (yy >= 30) & (yy < top)
+        face = span & ~cargo & (yy >= top - 30) & (yy < top)
+        gray = np.full((200, 300), 120, np.uint8)
+        gray[cargo], gray[face], gray[black] = (10, 10, 10) if above_is_dark else (220, 90, 10)
+        gray[span & (xx > 120) & (xx < 150) & (yy >= top + 2) & (yy < top + 5)] = 150      # the label
+        masks = {"LSP": [face | black], "cargo": [cargo], "floor": [~(face | black | cargo)]}
+        return masks, gray
+
+    def test_source_edge_is_the_top_of_the_side_face_not_the_shadow_under_a_raised_sheet(self):
+        masks, gray = self.carried_sheet()
+        edge, info = source_edge(masks, (300, 200), gray, lambda p: (p[0], p[1] - 7))
+        self.assertEqual(info["method"], "side_face_top")
+        self.assertEqual(info["reference"], "floor_line")             # the same black band at both ends
+        self.assertAlmostEqual(info["side_face_px"][0], 12, delta=1)  # side face and shadow together
+        self.assertAlmostEqual(info["side_face_px"][1], 12, delta=1)
         (x0, y0), (x1, y1) = edge
-        self.assertEqual(info["method"], "lsd_top_face_edge")
-        # the top-face edge runs from (50, 100) to (230, 120); the floor contact is 6 px lower
-        expected = lambda x: 100 + (x - 50) * 20 / 180
-        self.assertLess(abs(y0 - expected(x0)), 3)
-        self.assertLess(abs(y1 - expected(x1)), 3)
+        self.assertLess(abs(x0 - 60), 4)
+        self.assertLess(abs(x1 - 240), 4)
+        self.assertLess(abs(y0 - 100), 2)
+        self.assertLess(abs(y1 - 110), 2)                             # the floor contact lifted by 7 px gives 115
+        # the same shape with a side face below it (a container's flat top) is not a sheet on the floor
+        with self.assertRaisesRegex(RuntimeError, "on the floor"):
+            source_edge({**masks, "floor": [masks["floor"][0] & (np.mgrid[0:200, 0:300][0] > 170)]}, (300, 200), gray,
+                        lambda p: p)
+
+    def test_uneven_shadow_makes_the_measured_rim_the_reference_instead_of_the_floor_line(self):
+        # one end of the sheet is held higher: no shadow at the left end and 5 px at the right, so the mask's
+        # lower outline is not parallel to the sheet and only the rim itself gives the edge
+        masks, gray = self.carried_sheet(shadow=(0, 5))
+        edge, info = source_edge(masks, (300, 200), gray, lambda p: (p[0], p[1] - 7))
+        self.assertEqual(info["reference"], "top_rim")
+        self.assertGreater(info["side_face_px"][1] - info["side_face_px"][0], 3)
+        (x0, y0), (x1, y1) = edge
+        self.assertLess(abs(y0 - 100), 2.5)
+        self.assertLess(abs(y1 - 110), 2.5)
+
+    def test_source_edge_falls_back_to_the_lifted_floor_contact_without_a_visible_step(self):
+        masks, gray = self.carried_sheet(above_is_dark=True)         # dark load on a dark sheet: no edge to see
+        edge, info = source_edge(masks, (300, 200), gray, lambda p: (p[0] + 1, p[1] - 7))
+        self.assertEqual(info["method"], "floor_contact_lifted_by_thickness")
+        self.assertEqual(edge[0][0], info["floor_contact_px"][0][0] + 1)
+        self.assertEqual(edge[0][1], info["floor_contact_px"][0][1] - 7)
 
 
 if __name__ == "__main__":

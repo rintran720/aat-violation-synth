@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 from PIL import Image
 
 from synth import valid_to_violation as pipeline
@@ -105,6 +106,9 @@ class ValidToViolationTests(unittest.TestCase):
         review = (mock.patch.object(pipeline, "astra", return_value=aesthetic) if aesthetic is not None else
                   mock.patch.object(pipeline, "astra", side_effect=AssertionError("realism review is switched off")))
         calls = []
+        # the sheet the image model actually drew: lower and further right than the projected polygon
+        footprint = np.zeros((110, 120), bool)
+        footprint[62:106, 34:96] = True
 
         class FakeSam3:
             def __init__(self, _cache):
@@ -143,13 +147,15 @@ class ValidToViolationTests(unittest.TestCase):
               mock.patch.object(pipeline, "guided_edit", side_effect=fake_edit),
               mock.patch.object(pipeline, "MogePoints", FakeMoge),
               mock.patch.object(pipeline, "verify_sheet_geometry", side_effect=sheet_geometry or [passed] * 9),
-              mock.patch.object(pipeline, "verify_cargo_masks", return_value=passed),
+              mock.patch.object(pipeline, "added_sheet", return_value=(1, footprint)),
+              mock.patch.object(pipeline, "verify_cargo_masks", return_value=passed) as cargo_check,
               mock.patch.object(pipeline, "image_shape_ok", return_value=True),
               mock.patch.object(pipeline, "raw_drift", return_value=drift),
               review,
               mock.patch.object(pipeline.shutil, "which", return_value="/usr/bin/codex")):
             code = pipeline.main()
         report = json.loads(next((root / "work/out").glob("final_vision_*/report.json")).read_text())
+        self.cargo_check = cargo_check
         return code, output, calls, report
 
     def test_vision_pipeline_gates_sheet_then_adds_cargo_from_accepted_sheet(self) -> None:
@@ -182,6 +188,17 @@ class ValidToViolationTests(unittest.TestCase):
             self.assertIn("sheet_01.png", [image.name for image in calls[1][3]])   # and sees what was measured
             self.assertIn("rotated +12.0 deg", calls[1][2])
             self.assertEqual(report["calls"]["image edit - add empty LSP (Astra + imagegen)"], 2)
+
+    def test_cargo_stage_works_on_the_accepted_sheet_not_on_the_projected_polygon(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            _, _, calls, report = self.run_pipeline(Path(folder), None)
+            sheet = [[34, 62], [95, 62], [95, 105], [34, 105]]
+            self.assertCountEqual(report["accepted_sheet_outline_px"], sheet)
+            self.assertCountEqual(self.cargo_check.call_args.args[2], sheet)     # support is checked on the real sheet
+            box = report["cargo_target"]["box_px"]
+            self.assertTrue(62 < box[3] <= 105 and 34 < (box[0] + box[2]) / 2 < 95)   # cargo stands on it
+            self.assertIn(str(report["accepted_sheet_outline_px"]), calls[1][2])
+            self.assertNotIn(str(report["target_polygon_px"]), calls[1][2])
 
     def test_geometry_alone_decides_without_the_realism_review(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
