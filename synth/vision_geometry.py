@@ -19,7 +19,7 @@ PROMPTS = {
     "cargo": ("stretch wrapped cargo", "box"),
     "floor": ("floor",),
 }
-GUIDE_COLOURS = ((0, 255, 70), (255, 170, 0), (255, 0, 255))   # line colours of the guide and correction images
+GUIDE_COLOURS = ((0, 255, 70),)   # line colour of the geometry guide image
 
 
 def union(masks: list[np.ndarray], shape: tuple[int, int]) -> np.ndarray:
@@ -304,7 +304,9 @@ def edge_on_floor(points: np.ndarray, valid: np.ndarray, edge_px: list[list[int]
     return centre + start * direction, direction, float(slope)
 
 
-SHEET_TOLERANCES = {"angle_deg": 5., "size_ratio": .10, "gap_m": .10, "lateral_m": .15}
+# Depth runs along the viewing direction, where neither the calibrated camera nor MoGe is good to 10% (they
+# differ by about 20% on s_003), so it gets twice the width's tolerance.
+SHEET_TOLERANCES = {"angle_deg": 5., "width_ratio": .10, "depth_ratio": .20, "gap_m": .10, "lateral_m": .15}
 
 
 def compare_sheets(points: np.ndarray, valid: np.ndarray, floor: np.ndarray, old_mask: np.ndarray | None,
@@ -364,10 +366,10 @@ def compare_sheets(points: np.ndarray, valid: np.ndarray, floor: np.ndarray, old
     if abs(angle) > tolerances["angle_deg"]:
         failures.append(f"the new LSP is rotated {angle:+.1f} deg relative to the original sheet's front edge; it "
                         f"must be parallel to it (within {tolerances['angle_deg']:.0f} deg)")
-    if abs(width_ratio - 1) > tolerances["size_ratio"]:
+    if abs(width_ratio - 1) > tolerances["width_ratio"]:
         failures.append(f"the new LSP is {width_ratio:.0%} of the original's width along the shared edge "
                         f"({new_width:.2f} m vs {old_width:.2f} m); it must be the same size")
-    if abs(depth_ratio - 1) > tolerances["size_ratio"]:
+    if abs(depth_ratio - 1) > tolerances["depth_ratio"]:
         failures.append(f"the new LSP is {depth_ratio:.0%} of the original's depth across the shared edge "
                         f"({new_depth:.2f} m vs {old_depth:.2f} m); it must be the same size")
     if gap > tolerances["gap_m"]:
@@ -532,8 +534,7 @@ def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[s
                           region: Image.Image, points: np.ndarray, valid: np.ndarray, floor: np.ndarray,
                           edge_px: list[list[int]], toward_px, depth_to_width: float) -> dict:
     """One new LSP inside the edit region, no cargo yet, and the new sheet's orientation, size and position equal
-    to the original's on the floor plane (compare_sheets). new_rect_px is the new sheet's image outline (minimum
-    area rectangle of its mask) for a correction edit, None when there is no new sheet to correct.
+    to the original's on the floor plane (compare_sheets).
 
     The new sheet is its SAM3 instance on the new side of the shared edge's line. It is not "instance minus the
     original's mask": that mask also covers the original's side face and shadow below its top-face edge, pixels an
@@ -551,9 +552,8 @@ def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[s
     new_cargo = union(candidate.get("cargo", []), shape) & ~union(source.get("cargo", []), shape)
     if (new_cargo & inside).sum() > 1000:
         failures.append("Cargo appeared before the cargo stage")
-    result = {"new_lsp_instances": len(new), "new_rect_px": None}
+    result = {"new_lsp_instances": len(new)}
     if new:
-        import cv2
         a, b = np.asarray(edge_px, dtype=float)
         normal = np.array([-(b - a)[1], (b - a)[0]])
         if float((np.asarray(toward_px, dtype=float) - a) @ normal) < 0:
@@ -564,9 +564,6 @@ def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[s
         old = sheet_at_edge(source.get("LSP", []), edge_px)
         result.update(compare_sheets(points, valid, floor, old, edge_px, toward_px, sheet, depth_to_width))
         failures = result["failures"] + failures
-        ys, xs = np.nonzero(sheet)
-        box = cv2.boxPoints(cv2.minAreaRect(np.c_[xs, ys].astype(np.float32)))
-        result["new_rect_px"] = [[int(round(x)), int(round(y))] for x, y in box]
     result.update({"passed": not failures, "failures": failures})
     return result
 

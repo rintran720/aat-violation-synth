@@ -110,6 +110,13 @@ class ObliqueViewTests(unittest.TestCase):
         for measured in (gap, short, shifted):
             self.assertFalse(measured["passed"])
 
+    def test_depth_may_differ_by_a_fifth_width_by_a_tenth(self):
+        # depth along the view is the least certain measure (camera and MoGe differ by ~20% on s_003)
+        self.assertTrue(oblique(((-1.15, 8.43, 0), (1.15, 10., .09)))["passed"])        # 85% deep
+        self.assertTrue(oblique(((-1.15, 7.87, 0), (1.15, 10., .09)))["passed"])        # 115% deep
+        self.assertFalse(oblique(((-1.15, 7.6, 0), (1.15, 10., .09)))["passed"])        # 130% deep
+        self.assertFalse(oblique(((-.98, 8.15, 0), (.98, 10., .09)))["passed"])         # 85% wide
+
 
 class VisionGeometryTests(unittest.TestCase):
     def test_sheet_then_supported_cargo_pass_masks(self):
@@ -144,7 +151,6 @@ class VisionGeometryTests(unittest.TestCase):
         self.assertLess(abs(measured["gap_m"]), .05)
         self.assertLess(abs(measured["lateral_m"]), .05)
         self.assertEqual(measured["old_depth_source"], "measured")
-        self.assertEqual(len(measured["new_rect_px"]), 4)
 
     def test_narrow_shifted_sheet_reports_width_and_lateral_offset(self):
         measured = measure(rect(20, 10, 114, 101), rect(40, 102, 114, 193))
@@ -210,12 +216,12 @@ class VisionGeometryTests(unittest.TestCase):
         self.assertLess(abs(measured["gap_m"]), .05)
         self.assertTrue(measured["passed"], measured["failures"])
 
-    def test_no_new_sheet_has_nothing_to_correct(self):
+    def test_no_new_sheet_fails_without_measurements(self):
         points, valid, floor, source, _ = scene(rect(20, 10, 114, 101), np.zeros((240, 140), bool))
         measured = verify_sheet_geometry(source, source, Image.new("L", SIZE, 255), points, valid, floor, EDGE,
                                          TOWARD, DEPTH_TO_WIDTH)
         self.assertFalse(measured["passed"])
-        self.assertIsNone(measured["new_rect_px"])
+        self.assertNotIn("depth_ratio", measured)
 
     def test_source_pixels_outside_edit_region_remain_exact(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -2,24 +2,27 @@
 
 Run: python -m synth.valid_to_violation <valid frame> [--reference-map work/catalogue3d/reference_maps/<stem>/reference_map.json]
      [--contact-edge x1,y1,x2,y2] [--camera work/camera.json] [--calibration work/calibration.json]
+     [--aesthetic-review]
 
-Two edits on the real frame, each gated by code before a visual review:
-1. one EMPTY LSP: the front edge of the loaded sheet's top face is measured on the photo (or given), the equal
-   second sheet is projected from it with the camera calibration (the guide), an image model adds it, and the
-   result is composited back (original pixels outside a bounded region and on SAM3-protected objects). Code checks
-   the raw output's shape and drift, guide marks and the composite's integrity, then measures the new sheet against
-   the original with SAM3 masks and a MoGe point map of the candidate: orientation, width, depth, gap and lateral
-   offset on the floor plane (one new instance, no cargo); then Astra scores realism on a close-up. A failed
-   candidate that has a new sheet is not regenerated: the next attempt edits that candidate, with the measured
-   deviations and an overlay (target outline and where the sheet is now) as correction instructions.
+Two edits on the real frame, each gated by code. For now geometry alone decides: the scored realism review by Astra
+runs only with --aesthetic-review, and then it gates too.
+1. one EMPTY LSP: the front edge of the loaded sheet's top face is measured on the photo (or given) and is the
+   whole guide: the image model adds an identical sheet along it and infers its depth from the scene. (The equal
+   sheet projected with the camera calibration only bounds the edit region and places the cargo: its depth was not
+   reliable enough to dictate.) The result is composited back (original pixels outside a bounded region and on
+   SAM3-protected objects). Code checks the raw output's shape and drift, guide marks and the composite's
+   integrity, then measures the new sheet against the original with SAM3 masks and a MoGe point map of the
+   candidate: orientation, width, depth, gap and lateral offset on the floor plane (one new instance, no cargo).
+   A failed candidate goes back to Astra with its measured deviations, as a reference image beside the prompt:
+   the retry edits the source frame again and corrects them (editing the failed candidate itself made it worse).
 2. one CARGO on that sheet, starting every retry from the accepted sheet, with the same gates (support on the sheet,
    one instance, height, unchanged exposed deck).
 References (forklift, LSP, SKID, cargo) are appearance only; by default Step A crops (work/refs/index.json),
 or a --reference-map, e.g. from synth.catalogue_reference_map (view-matched renders of the 3D catalogue). When the
 map gives the cargo's size_m, the cargo's target box is the projection of that 3D box. A failed gate never publishes.
 Every run, accepted or not, also writes <output stem>_summary.png next to the output: the input on the left, the
-output (or the last candidate) on the right, and the run statistics in English below (model calls by purpose,
-attempts per stage, result, last scores and failures).
+output (or the candidate with the fewest failures) on the right, and the run statistics in English below (model
+calls by purpose, attempts per stage, result, last scores and failures).
 """
 
 from __future__ import annotations
@@ -201,11 +204,11 @@ class Camera:
 
 def make_geometry_guide(source: Path, contact_edge: list[list[int]], work: Path,
                         camera_path: Path | None = None, calibration_path: Path | None = None) -> Path:
-    """Project one measured LSP depth from the original sheet's shared edge.
+    """Mark the original sheet's shared edge on the frame (the guide image) and project one calibrated LSP depth
+    from it.
 
-    This is an editing guide, not a claim that imagegen follows its pixels.
-    The two sheets use the same shared endpoints by construction. geometry.json also keeps the new sheet's world
-    corners on its top face, for the cargo's target box.
+    The projected sheet is not shown to the image model: it bounds the edit region and, through geometry.json (which
+    also keeps the new sheet's world corners on its top face), places the cargo's target box.
     """
     camera = Camera(camera_path or CAMERA)
     calibration = json.loads((calibration_path or CALIBRATION).read_text())
@@ -229,7 +232,6 @@ def make_geometry_guide(source: Path, contact_edge: list[list[int]], work: Path,
             raise RuntimeError("Input dimensions do not match the camera calibration")
     draw = ImageDraw.Draw(guide)
     draw.line([shared_left, shared_right], fill=(0, 255, 70), width=5)
-    draw.line([shared_left, near_left, near_right, shared_right], fill=(255, 170, 0), width=5)
     draw.text((near_left[0], near_left[1] + 12), "GEOMETRY GUIDE ONLY - DO NOT RENDER LINES", fill=(255, 255, 255))
     path = work / "geometry_guide.png"
     guide.save(path)
@@ -240,7 +242,7 @@ def make_geometry_guide(source: Path, contact_edge: list[list[int]], work: Path,
         "original_contact_edge_width_m": round(edge_width_m, 3),
         "new_lsp_length_m": depth_m,
         "source": str(source),
-        "note": "Projection guide only; final image pixels require visual verification",
+        "note": "Projection for the edit region and the cargo box only; the image model is given the shared edge",
     }, indent=2))
     return path
 
@@ -261,19 +263,6 @@ def cargo_target_box(geometry: dict, camera_path: Path, size_m: list[float]) -> 
               for sx in (-1, 1) for sy in (-1, 1) for z in (0., h)]
     px = np.array([camera.project(p) for p in points])
     return [int(px[:, 0].min()), int(px[:, 1].min()), int(px[:, 0].max()), int(px[:, 1].max())]
-
-
-def correction_overlay(candidate: Path, polygon: list[list[int]], new_rect_px: list[list[int]], path: Path) -> Path:
-    """The candidate with the target outline (orange) and the measured outline of the new sheet (magenta)."""
-    with Image.open(candidate) as image:
-        overlay = image.convert("RGB")
-    draw = ImageDraw.Draw(overlay)
-    draw.line([*map(tuple, polygon), tuple(polygon[0])], fill=(255, 170, 0), width=4)
-    draw.line([*map(tuple, new_rect_px), tuple(new_rect_px[0])], fill=(255, 0, 255), width=4)
-    draw.text((polygon[0][0], polygon[0][1] - 18), "orange = target, magenta = now - MEASUREMENT MARKS ONLY",
-              fill=(255, 255, 255))
-    overlay.save(path)
-    return path
 
 
 def image_shape_ok(source: Path, candidate: Path) -> bool:
@@ -306,6 +295,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="gpt-image-2.5-sunburst")
     parser.add_argument("--camera", type=Path, default=CAMERA, help="camera.json of the input's camera")
     parser.add_argument("--calibration", type=Path, default=CALIBRATION, help="calibration.json with lsp_measured_size_m")
+    parser.add_argument("--aesthetic-review", action="store_true",
+                        help="also gate on Astra's realism scores (skipped for now: geometry first)")
     parser.add_argument("--step-a-index", type=Path, default=INDEX)
     parser.add_argument("--reference-map", type=Path, help="Four selected reference images; overrides Step A index")
     parser.add_argument("--image-cli", type=Path, default=Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "skills/.system/imagegen/scripts/image_gen.py")
@@ -346,8 +337,8 @@ def guided_edit(args: argparse.Namespace, images: list[Path], roles: list[str], 
 
 def gate(stage: str, base: Path, raw: Path | None, candidate: Path, region, protected, measured: dict,
          source: Path, polygon, ref: Path, args: argparse.Namespace, work: Path, attempt: int, describe: str) -> dict:
-    """All code checks of one candidate, then the scored visual review on a close-up. raw is None for a reused
-    candidate (only the composite exists)."""
+    """All code checks of one candidate and, with --aesthetic-review, the scored visual review on a close-up. raw
+    is None for a reused candidate (only the composite exists)."""
     checks = {"masks": measured}
     if raw is not None:
         checks["raw_shape_ok"] = image_shape_ok(source, raw)
@@ -361,6 +352,8 @@ def gate(stage: str, base: Path, raw: Path | None, candidate: Path, region, prot
         if key in checks:
             failures += checks[key]["failures"]
     zoom = zoom_pair(base, candidate, polygon, work / f"{stage}_zoom_{attempt:02d}.png")
+    if not args.aesthetic_review:
+        return {"checks": checks, "aesthetic": None, "failures": failures, "accepted": not failures}
     review = astra(args.codex_bin, [zoom, candidate, ref], AESTHETIC_SCHEMA,
                    f"Image 1 is a close-up: left BEFORE, right AFTER {describe}. Image 2 is the full frame after the "
                    "edit. Image 3 is an appearance reference. Score ONLY the realism of the added object in the "
@@ -375,9 +368,9 @@ def gate(stage: str, base: Path, raw: Path | None, candidate: Path, region, prot
 
 
 def summary_sheet(report: dict, path: Path, panel_height: int = 540) -> Path:
-    """One image per run: the source on the left, the output on the right (the published image, else the last
-    candidate, marked NOT ACCEPTED), and below them the run statistics in English: model calls by purpose,
-    attempts per stage, the result and the last failures."""
+    """One image per run: the source on the left, the output on the right (the published image, else the candidate
+    of the last stage with the fewest failures, marked NOT ACCEPTED), and below them the run statistics in English:
+    model calls by purpose, attempts per stage, the result and the last failures."""
     from PIL import ImageFont
 
     def font(size: int, bold: bool = False):
@@ -402,15 +395,15 @@ def summary_sheet(report: dict, path: Path, panel_height: int = 540) -> Path:
         return out
 
     stages = report.get("stages", {})
-    last = None
+    best = None
     for stage in ("cargo", "sheet"):
         if stages.get(stage):
-            last = stages[stage][-1]
+            best = min(stages[stage], key=lambda attempt: len(attempt.get("failures") or []))
             break
     accepted = bool(report.get("accepted"))
-    right_path = report.get("output") if accepted else (last or {}).get("candidate")
+    right_path = report.get("output") if accepted else (best or {}).get("candidate")
     left = panel(report.get("input"), "Input (valid frame)")
-    right = panel(right_path, "Output (violation)" if accepted else "Last candidate - NOT ACCEPTED")
+    right = panel(right_path, "Output (violation)" if accepted else "Best candidate - NOT ACCEPTED")
     calls = report.get("calls", {})
     lines = [("Result: " + ("ACCEPTED" if accepted else f"NOT ACCEPTED (stopped at {report.get('stopped_at', 'error')})"),
               (20, 130, 60) if accepted else (190, 30, 30), True)]
@@ -468,7 +461,7 @@ def main() -> int:
         raise RuntimeError("--max-attempts must be positive")
     if args.editor == "api" and (not args.image_cli.is_file() or not os.environ.get("OPENAI_API_KEY")):
         raise RuntimeError("--editor api requires the imagegen CLI and OPENAI_API_KEY")
-    if not shutil.which(args.codex_bin):
+    if (args.editor == "codex" or args.aesthetic_review) and not shutil.which(args.codex_bin):
         raise RuntimeError(f"Codex CLI is unavailable: {args.codex_bin}")
     camera_path = getattr(args, "camera", None) or CAMERA
     calibration_path = getattr(args, "calibration", None) or CALIBRATION
@@ -485,7 +478,8 @@ def main() -> int:
               "step_a_index": str(args.step_a_index.resolve()),
               "reference_map": str(args.reference_map.resolve()) if getattr(args, "reference_map", None) else None,
               "references": {key: str(value) for key, value in refs.items()},
-              "editor": args.editor, "stages": {"sheet": [], "cargo": []}, "accepted": False,
+              "editor": args.editor, "aesthetic_review": args.aesthetic_review,
+              "stages": {"sheet": [], "cargo": []}, "accepted": False,
               "calls": {}, "started_at": time.time()}
     editor_name = "Astra + imagegen" if args.editor == "codex" else f"API {args.model}"
 
@@ -531,7 +525,7 @@ def main() -> int:
                  & (np.asarray(sheet_region) == 0))
         toward = np.mean(geometry["new_lsp_near_edge_px"], axis=0).round().astype(int).tolist()
         moge = MogePoints(ROOT / "work/vision_cache/moge")
-        accepted_sheet = sheet_masks = last = None
+        accepted_sheet = sheet_masks = rejected = None
         feedback = ""
         for attempt in ([0] if getattr(args, "reuse_sheet", None) else range(1, args.max_attempts + 1)):
             raw = None
@@ -539,45 +533,33 @@ def main() -> int:
                 candidate = args.reuse_sheet.resolve()
                 if not candidate.is_file():
                     raise RuntimeError(f"--reuse-sheet image is missing: {candidate}")
-            elif last is not None and last["result"]["checks"]["masks"].get("new_rect_px"):
-                # correct the last candidate instead of regenerating: code measured what is wrong with it
-                raw = work / f"sheet_raw_{attempt:02d}.png"
-                candidate = work / f"sheet_{attempt:02d}.png"
-                outline = last["result"]["checks"]["masks"]["new_rect_px"]
-                overlay = correction_overlay(last["candidate"], polygon, outline,
-                                             work / f"sheet_correction_{attempt:02d}.png")
-                prompt = ("Correct the added EMPTY LSP in Image 1 (the new sheet in front of the loaded one) and keep "
-                          "everything else exactly as it is in Image 1. Code measured both sheets on the floor plane "
-                          "(SAM3 masks and MoGe depth): " + "; ".join(last["result"]["failures"]) + ". "
-                          f"Target top corners in source pixels: {polygon} (orange in Image 2); the added sheet is "
-                          f"now at about {outline} (magenta in Image 2). Make it one sheet with the original's size "
-                          "and orientation, its rear edge touching the original's front edge "
-                          f"{edge} along its full width. The coloured lines in Image 2 are measurement marks only "
-                          "and must not appear in the photograph. " + APPEARANCE_ONLY)
-                count_call(report, f"image edit - correct LSP geometry ({editor_name})")
-                guided_edit(args, [last["candidate"], overlay, refs["LSP"], source],
-                            ["Image 1 current candidate to correct", "Image 2 measurement overlay",
-                             f"Image 3 {ref_name} LSP appearance", "Image 4 original valid source"], prompt, raw, work)
-                preserve_outside(source, raw, candidate, sheet_region, protected)
             else:
                 raw = work / f"sheet_raw_{attempt:02d}.png"
                 candidate = work / f"sheet_{attempt:02d}.png"
-                prompt = ("Add exactly one EMPTY LSP on the floor at the guide polygon. Do not add cargo. Match the "
-                          f"{ref_name} LSP appearance, the scene's perspective, the sheet thickness and the CCTV texture. "
-                          "Keep the original forklift, cargo and LSP intact. Coloured guide marks must not appear in "
-                          f"the photograph. Target LSP top corners in source pixels: {polygon}. The shared rear edge "
-                          f"is {edge}; the new sheet spans its full width. " + APPEARANCE_ONLY + " " + feedback)
+                prompt = ("Add exactly one EMPTY LSP on the floor directly in front of the loaded LSP, on the side of "
+                          "its front edge that is nearer the camera. The green line in Image 5 marks that front edge, "
+                          f"from {edge[0]} to {edge[1]} in source pixels. The new sheet is identical to the loaded "
+                          "one: its rear edge lies along the green line over its full width, and it has the same "
+                          "width, depth, thickness and orientation (its sides parallel to the loaded sheet's), in the "
+                          "scene's perspective. Do not add cargo. Match the "
+                          f"{ref_name} LSP appearance and the CCTV texture. Keep the original forklift, cargo and LSP "
+                          "intact. The green line is a mark only and must not appear in the photograph. "
+                          + APPEARANCE_ONLY + " " + feedback)
                 count_call(report, f"image edit - add empty LSP ({editor_name})")
-                guided_edit(args, [source, refs["forklift"], refs["LSP"], refs["SKID"], guide],
+                # a retry shows Astra the rejected attempt in place of the SKID reference (five images at most)
+                fourth = ((refs["SKID"], f"Image 4 {ref_name} SKID preservation reference") if rejected is None else
+                          (rejected, "Image 4 the rejected previous attempt at this edit (a reference, not the base)"))
+                guided_edit(args, [source, refs["forklift"], refs["LSP"], fourth[0], guide],
                             ["Image 1 original valid source", f"Image 2 {ref_name} forklift appearance",
-                             f"Image 3 {ref_name} LSP appearance", f"Image 4 {ref_name} SKID preservation reference",
-                             "Image 5 geometry guide"], prompt, raw, work)
+                             f"Image 3 {ref_name} LSP appearance", fourth[1], "Image 5 geometry guide"],
+                            prompt, raw, work)
                 preserve_outside(source, raw, candidate, sheet_region, protected)
             candidate_masks = segmenter.get(candidate, ("LSP", "cargo"))
             points, valid = moge.get(candidate)
             measured = verify_sheet_geometry(source_masks, candidate_masks, sheet_region, points, valid, floor, edge,
                                              toward, calibrated_depth / measured_width)
-            count_call(report, "visual review - LSP realism (Astra)")
+            if args.aesthetic_review:
+                count_call(report, "visual review - LSP realism (Astra)")
             result = gate("sheet", source, raw, candidate, sheet_region, protected, measured, source, polygon,
                           refs["LSP"], args, work, attempt, "adding one empty LSP")
             report["stages"]["sheet"].append({"number": attempt, "candidate": str(candidate), **result})
@@ -587,8 +569,11 @@ def main() -> int:
             if result["accepted"]:
                 accepted_sheet, sheet_masks = candidate, candidate_masks
                 break
-            feedback = "Fix these failures: " + "; ".join(result["failures"])
-            last = {"candidate": candidate, "result": result}
+            rejected = candidate
+            feedback = ("Image 4 is a previous attempt at this edit. Code measured its new sheet against the loaded "
+                        "one on the floor plane (SAM3 masks, MoGe depth) and rejected it: "
+                        + "; ".join(result["failures"]) + ". Edit Image 1 again and correct exactly these "
+                        "deviations; keep what Image 4 already has right.")
         if accepted_sheet is None:
             report["stopped_at"] = "sheet_geometry_or_realism"
             return 2
@@ -649,7 +634,8 @@ def main() -> int:
                 preserve_outside(accepted_sheet, raw, candidate, cargo_region, cargo_protected)
             candidate_masks = segmenter.get(candidate, ("LSP", "cargo"))
             measured = verify_cargo_masks(sheet_masks, candidate_masks, polygon, size, min_height_px=min_height)
-            count_call(report, "visual review - cargo realism (Astra)")
+            if args.aesthetic_review:
+                count_call(report, "visual review - cargo realism (Astra)")
             result = gate("cargo", accepted_sheet, raw, candidate, cargo_region, cargo_protected, measured, source,
                           polygon, refs["cargo"], args, work, attempt, "adding one cargo on the new LSP")
             report["stages"]["cargo"].append({"number": attempt, "candidate": str(candidate), **result})

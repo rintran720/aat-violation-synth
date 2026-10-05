@@ -21,7 +21,7 @@ def args_for(root: Path, source: Path, output: Path, **extra) -> argparse.Namesp
     values = dict(input=source, output=output, max_attempts=1, editor="codex", model="unused",
                   step_a_index=root / "index.json", image_cli=root / "unused.py", codex_bin="codex",
                   contact_edge="20,50,80,50", reference_map=None, reuse_sheet=None, reuse_cargo=None,
-                  camera=root / "camera.json", calibration=root / "calibration.json")
+                  camera=root / "camera.json", calibration=root / "calibration.json", aesthetic_review=True)
     values.update(extra)
     return argparse.Namespace(**values)
 
@@ -89,8 +89,9 @@ class ValidToViolationTests(unittest.TestCase):
                     pipeline.main()
             self.assertFalse((root / "out.png").exists())
 
-    def run_pipeline(self, root: Path, aesthetic: dict, drift_passes: bool = True, sheet_geometry=None,
+    def run_pipeline(self, root: Path, aesthetic: dict | None, drift_passes: bool = True, sheet_geometry=None,
                      max_attempts: int = 1):
+        """aesthetic None: run without the realism review (the default of the command line)."""
         source = root / "valid.png"
         Image.new("RGB", (120, 110), "gray").save(source)
         (root / "calibration.json").write_text(json.dumps({"lsp_measured_size_m": [1.9, 1.85]}))
@@ -100,7 +101,9 @@ class ValidToViolationTests(unittest.TestCase):
             Image.new("RGB", (20, 20), "white").save(ref)
             refs[category] = ref
         output = root / "final.png"
-        args = args_for(root, source, output, max_attempts=max_attempts)
+        args = args_for(root, source, output, max_attempts=max_attempts, aesthetic_review=aesthetic is not None)
+        review = (mock.patch.object(pipeline, "astra", return_value=aesthetic) if aesthetic is not None else
+                  mock.patch.object(pipeline, "astra", side_effect=AssertionError("realism review is switched off")))
         calls = []
 
         class FakeSam3:
@@ -143,7 +146,7 @@ class ValidToViolationTests(unittest.TestCase):
               mock.patch.object(pipeline, "verify_cargo_masks", return_value=passed),
               mock.patch.object(pipeline, "image_shape_ok", return_value=True),
               mock.patch.object(pipeline, "raw_drift", return_value=drift),
-              mock.patch.object(pipeline, "astra", return_value=aesthetic),
+              review,
               mock.patch.object(pipeline.shutil, "which", return_value="/usr/bin/codex")):
             code = pipeline.main()
         report = json.loads(next((root / "work/out").glob("final_vision_*/report.json")).read_text())
@@ -166,20 +169,49 @@ class ValidToViolationTests(unittest.TestCase):
             with Image.open(report["summary_image"]) as summary:   # input | output side by side, stats below
                 self.assertGreater(summary.width, 2 * 120)
 
-    def test_measured_sheet_is_corrected_on_the_candidate_not_regenerated(self) -> None:
+    def test_failed_sheet_is_redone_from_the_source_with_its_measurements_and_the_failed_image(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             wrong = {"passed": False, "failures": ["the new LSP is rotated +12.0 deg relative to the original"],
-                     "new_rect_px": [[20, 60], [80, 55], [82, 98], [22, 102]], "angle_deg": 12.0, "width_ratio": 1.0,
-                     "depth_ratio": 1.0, "gap_m": 0.0, "lateral_m": 0.0}
-            right = {"passed": True, "failures": [], "new_rect_px": [[20, 50], [80, 50], [80, 95], [20, 95]]}
-            code, output, calls, report = self.run_pipeline(Path(folder), SCORED, sheet_geometry=[wrong, right],
+                     "angle_deg": 12.0, "width_ratio": 1.0, "depth_ratio": 1.0, "gap_m": 0.0, "lateral_m": 0.0}
+            right = {"passed": True, "failures": []}
+            code, output, calls, report = self.run_pipeline(Path(folder), None, sheet_geometry=[wrong, right],
                                                             max_attempts=2)
             self.assertEqual(code, 0)
             self.assertEqual([name for name, *_ in calls], ["sheet_raw_01.png", "sheet_raw_02.png", "cargo_raw_01.png"])
-            self.assertEqual(calls[1][1], "sheet_01.png")                  # edits the failed candidate
-            self.assertEqual(calls[1][3][1].name, "sheet_correction_02.png")
+            self.assertEqual(calls[1][1], "valid.png")                     # the edit starts from the source again
+            self.assertIn("sheet_01.png", [image.name for image in calls[1][3]])   # and sees what was measured
             self.assertIn("rotated +12.0 deg", calls[1][2])
-            self.assertIn("image edit - correct LSP geometry (Astra + imagegen)", report["calls"])
+            self.assertEqual(report["calls"]["image edit - add empty LSP (Astra + imagegen)"], 2)
+
+    def test_geometry_alone_decides_without_the_realism_review(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            code, output, calls, report = self.run_pipeline(Path(folder), None)   # astra() would raise if called
+            self.assertEqual(code, 0)
+            self.assertTrue(output.is_file())
+            self.assertEqual(report["calls"], {"image edit - add empty LSP (Astra + imagegen)": 1,
+                                               "image edit - add cargo (Astra + imagegen)": 1})
+            self.assertIsNone(report["stages"]["sheet"][0]["aesthetic"])
+            self.assertTrue(Path(report["summary_image"]).is_file())
+
+    def test_sheet_prompt_gives_the_shared_edge_but_no_target_polygon(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            _, _, calls, report = self.run_pipeline(Path(folder), SCORED)
+            prompt = calls[0][2]
+            self.assertIn("from [20, 50] to [80, 50]", prompt)              # the measured front edge
+            self.assertNotIn(str(report["target_polygon_px"]), prompt)     # depth is the image model's to infer
+            self.assertNotIn("[20, 95]", prompt)
+
+    def test_summary_shows_the_candidate_with_the_fewest_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name, colour in (("in", "gray"), ("a", "red"), ("b", "blue")):
+                Image.new("RGB", (160, 90), colour).save(root / f"{name}.png")
+            report = {"input": str(root / "in.png"), "accepted": False, "calls": {}, "stages": {"cargo": [], "sheet": [
+                {"candidate": str(root / "a.png"), "failures": ["one"]},
+                {"candidate": str(root / "b.png"), "failures": ["one", "two", "three"]}]}}
+            with Image.open(pipeline.summary_sheet(report, root / "summary.png", panel_height=90)) as summary:
+                red, _, blue = summary.convert("RGB").getpixel((160 + 20 + 80, 40 + 45))
+            self.assertGreater(red, blue)
 
     def test_low_realism_score_stops_without_publishing(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
