@@ -94,15 +94,15 @@ def _fit_line(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return centre, direction
 
 
-def dominant_line(xs: np.ndarray, ys: np.ndarray, max_angle_deg: float = 40,
-                  tolerance_px: float = 1.5) -> tuple[float, float, np.ndarray] | None:
+def dominant_line(xs: np.ndarray, ys: np.ndarray, max_angle_deg: float = 40, tolerance_px: float = 1.5,
+                  min_inliers: int = 30) -> tuple[float, float, np.ndarray] | None:
     """The line y = offset + slope * x that most points lie on (RANSAC over pairs, then least squares on its
-    inliers), within max_angle_deg of horizontal: (slope, offset, inliers). None with fewer than 30 inliers."""
+    inliers), within max_angle_deg of horizontal: (slope, offset, inliers). None with fewer than min_inliers."""
     rng = np.random.default_rng(0)
     best = None
     for _ in range(300):
         i, j = rng.choice(len(xs), 2, replace=False)
-        if abs(int(xs[i]) - int(xs[j])) < 20:
+        if abs(int(xs[i]) - int(xs[j])) < min(20, min_inliers // 2):
             continue
         slope = (ys[j] - ys[i]) / (xs[j] - xs[i])
         if abs(np.degrees(np.arctan(slope))) > max_angle_deg:
@@ -110,7 +110,7 @@ def dominant_line(xs: np.ndarray, ys: np.ndarray, max_angle_deg: float = 40,
         inliers = np.abs(ys[i] + slope * (xs - xs[i]) - ys) <= tolerance_px
         if best is None or inliers.sum() > best.sum():
             best = inliers
-    if best is None or best.sum() < 30:
+    if best is None or best.sum() < min_inliers:
         return None
     slope, offset = np.polyfit(xs[best], ys[best], 1)
     return float(slope), float(offset), np.abs(offset + slope * xs - ys) <= tolerance_px
@@ -198,6 +198,78 @@ def side_face_height(mask: np.ndarray, gray: np.ndarray, contact: list[list[int]
 EVEN_PX = 1.5      # the black band under a sheet counts as equally high at both ends within this
 
 
+def line_y(line: list[list[int]], x: float) -> float:
+    (x0, y0), (x1, y1) = line
+    return y0 + (y1 - y0) * (x - x0) / max(x1 - x0, 1e-6)
+
+
+def side_edges(mask: np.ndarray, gray: np.ndarray, contact: list[list[int]], rim: list[list[int]]) -> dict:
+    """The sheet's side edges, which run back from its front corners, and the front corners they give.
+
+    The slab has four side edges: left top, left bottom, right top, right bottom. The mask's outline shows one per
+    side: the bottom edge where that side face is in view (a dark strip just inside the outline), the top edge
+    where it is not. Each is a line fitted to the outline rows above the front band. Its crossing with the front
+    line of the same height (contact line for a bottom edge, rim for a top edge) is a front corner, sharper than
+    the mask's rounded extent; the other corner on that side is straight above or below it. Returns
+    {"left": {...} | None, "right": {...} | None, "corners_px": {"left": x, "right": x}} with the x of each front
+    corner; a side without a usable line keeps the contact line's end. angle_deg is the direction of the edge
+    going back from the front, from the image's +x axis with y up: 90 is straight up, more leans left."""
+    (x0, y0), (x1, y1) = contact
+    result = {"corners_px": {"left": x0, "right": x1}}
+    band = below_line(mask, rim, toward=[(x0 + x1) / 2, max(y0, y1) + 5])
+    dark = float(np.median(gray[band])) if band.any() else 20.
+    face_pixels = mask & ~band
+    light = float(np.percentile(gray[face_pixels], 75)) if face_pixels.any() else dark + 60
+    for side, pick, sign in (("left", np.argmax, 1), ("right", lambda row: len(row) - 1 - np.argmax(row[::-1]), -1)):
+        rows, xs = [], []
+        for y in range(int(mask.shape[0])):
+            row = mask[y]
+            if not row.any():
+                continue
+            x = int(pick(row))
+            if y >= line_y(rim, x) - 2:                                      # the front band is not a side
+                continue
+            rows.append(y)
+            xs.append(x)
+        result[side] = None
+        if len(rows) < 12:
+            continue
+        line = dominant_line(np.array(rows, dtype=float), np.array(xs, dtype=float), max_angle_deg=70, min_inliers=12)
+        if line is None:
+            continue
+        slope, offset, inliers = line                                        # x = offset + slope * y
+        inside = np.array([gray[y, min(max(int(round(offset + slope * y)) + sign * 3, 0), gray.shape[1] - 1)]
+                           for y in np.array(rows)[inliers]])
+        kind = "bottom" if float(np.median(inside)) < dark + .35 * (light - dark) else "top"
+        front_line = contact if kind == "bottom" else rim
+        # crossing of x = offset + slope * y with the front line y = line_y(front_line, x)
+        (fx0, fy0), (fx1, fy1) = front_line
+        m = (fy1 - fy0) / max(fx1 - fx0, 1e-6)
+        x = (offset + slope * (fy0 - m * fx0)) / (1 - slope * m)
+        # SAM3 rounds the corner: where the outline leaves the line before the front, the corner is straight
+        # below the last point on it (the slab's vertical front edge), not further along the line
+        y_last = max(np.array(rows)[inliers])
+        x_last = offset + slope * y_last
+        if line_y(rim, x_last) - y_last > 4:
+            x = x_last
+        angle = float(np.degrees(np.arctan2(1, -slope)))     # of the edge going back: 90 straight up, >90 leaning left
+        result[side] = {"kind": kind, "angle_deg": round(angle, 1),
+                        "rows": int(inliers.sum()), "crossing_px": round(float(x), 1)}
+        if abs(x - result["corners_px"][side]) <= 12:                        # a plausible corner refines the end
+            result["corners_px"][side] = int(round(x))
+    return result
+
+
+def below_line(mask: np.ndarray, line: list[list[int]], toward) -> np.ndarray:
+    """The mask's pixels on the side of `line` that contains the point `toward`: below the rim this is the front
+    side face and the shadow under a raised sheet. A sheet standing in front hides that band, so it needs no
+    protection in the composite (the slab is 3D)."""
+    (x0, y0), (x1, y1) = line
+    yy, xx = np.mgrid[0:mask.shape[0], 0:mask.shape[1]]
+    sign = np.sign((toward[1] - y0) * (x1 - x0) - (toward[0] - x0) * (y1 - y0)) or 1
+    return mask & (((yy - y0) * (x1 - x0) - (xx - x0) * (y1 - y0)) * sign > 0)
+
+
 def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int], gray: np.ndarray,
                 lift) -> tuple[list[list[int]], dict]:
     """Find the central loaded LSP by cargo overlap and the top front edge of that slab: the edge a second sheet
@@ -270,9 +342,15 @@ def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int],
         measured = [half for half in halves if half]
         heights = [sum(h * n for _, h, n in measured) / sum(n for _, _, n in measured)] * 2
     edge = [[x, int(round(y - h))] for (x, _), (_, y), h in zip(lifted, contact, heights)]
+    # the side edges sharpen the front corners: the mask's extent is rounded by a few pixels
+    sides = side_edges(mask, gray, contact, edge)
+    for i, side in enumerate(("left", "right")):
+        x = sides["corners_px"][side] + (lifted[i][0] - contact[i][0])
+        edge[i] = [int(x), int(round(line_y(edge, x)))]
     return edge, {"method": "side_face_top", "edge_observed": True, "reference": reference,
                   "side_face_px": [round(h, 1) for h in heights],
-                  "rim_columns": [half[2] if half else 0 for half in halves], **info}
+                  "rim_columns": [half[2] if half else 0 for half in halves],
+                  "side_edges": {k: v for k, v in sides.items() if k != "corners_px"}, **info}
 
 
 class MogePoints:

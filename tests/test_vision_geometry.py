@@ -7,8 +7,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from synth.vision_geometry import (added_sheet, edit_region, floor_contact_edge, guide_marks, outline, polygon_mask,
-                                   preserve_outside, raw_drift, source_edge, verify_cargo_masks, verify_sheet_geometry)
+from synth.vision_geometry import (added_sheet, below_line, edit_region, floor_contact_edge, guide_marks, outline,
+                                   polygon_mask, preserve_outside, raw_drift, side_edges, source_edge,
+                                   verify_cargo_masks, verify_sheet_geometry)
 
 
 SCALE = .02                     # metres per pixel on the synthetic floor
@@ -330,6 +331,57 @@ class VisionGeometryTests(unittest.TestCase):
         (x0, y0), (x1, y1) = edge
         self.assertLess(abs(y0 - 100), 2.5)
         self.assertLess(abs(y1 - 110), 2.5)
+
+    def slab_with_sides(self):
+        """A loaded slab seen a little from the left: the top face is a parallelogram whose left side edge runs from
+        the rear-left corner (90, 40) to the front-left corner (60, 100) and whose right side edge from (270, 40)
+        to (240, 110); the black front side face is 7 px high and the left side face shows as a dark strip along the
+        left edge. The load covers the middle of the top face. The mask's corners are rounded like SAM3's."""
+        yy, xx = np.mgrid[0:200, 0:300]
+        top = 100 + (xx - 60) * 10 / 180
+        left_x = 90 - (yy - 40) * 30 / 60                                 # left top edge, x as a function of y
+        right_x = 270 - (yy - 40) * 30 / 70
+        face = (yy >= 40) & (yy < top) & (xx >= left_x) & (xx <= right_x)
+        black = (yy >= top) & (yy < top + 7) & (xx >= left_x - 6) & (xx <= 240)   # the side strip reaches the floor
+        left_side = (yy >= 40) & (yy < top) & (xx >= left_x - 6) & (xx < left_x)      # dark side face strip
+        cargo = (xx >= 110) & (xx <= 200) & (yy >= 10) & (yy < top - 2)
+        gray = np.full((200, 300), 120, np.uint8)
+        gray[face] = 90
+        gray[left_side] = 15
+        gray[black] = 10
+        gray[cargo] = 220
+        mask = (face | black | left_side) & ~cargo
+        mask &= ~(((xx - 60) ** 2 + (yy - top) ** 2 < 9) | ((xx - 240) ** 2 + (yy - top) ** 2 < 9))  # rounded corners
+        return mask, gray, cargo
+
+    def test_side_edges_find_the_four_side_lines_and_sharpen_the_front_corners(self):
+        mask, gray, _ = self.slab_with_sides()
+        contact = [[55, 107], [236, 116]]                                   # from the rounded mask: 3-4 px short
+        rim = [[55, 100], [236, 110]]
+        sides = side_edges(mask, gray, contact, rim)
+        self.assertEqual(sides["left"]["kind"], "bottom")                   # the dark left side face shows
+        self.assertEqual(sides["right"]["kind"], "top")                     # the right side is hidden
+        self.assertLess(abs(sides["left"]["angle_deg"] - 63), 6)            # atan(60 / 30)
+        self.assertLess(abs(sides["right"]["angle_deg"] - 67), 6)           # both lean right going back
+        self.assertLess(abs(sides["corners_px"]["left"] - 51), 3)           # where the left bottom edge meets the floor line
+        self.assertLess(abs(sides["corners_px"]["right"] - 240), 3)
+
+    def test_source_edge_uses_the_side_lines_for_the_corners(self):
+        mask, gray, cargo = self.slab_with_sides()
+        masks = {"LSP": [mask], "cargo": [cargo], "floor": [~(mask | cargo)]}
+        edge, info = source_edge(masks, (300, 200), gray, lambda p: (p[0], p[1] - 7))
+        self.assertIn("side_edges", info)
+        self.assertLess(abs(edge[1][0] - 240), 3)
+        self.assertLess(abs(edge[1][1] - 110), 2.5)
+
+    def test_below_line_is_the_front_band_under_the_rim(self):
+        mask, gray, _ = self.slab_with_sides()
+        band = below_line(mask, [[60, 100], [240, 110]], toward=[150, 150])
+        self.assertTrue(band[108, 150])                                     # the black front face (rim at 105)
+        self.assertFalse(band[90, 150])                                     # the top face stays
+        yy, xx = np.mgrid[0:200, 0:300]
+        expected = mask & (yy > 100 + (xx - 60) * 10 / 180)
+        self.assertLess(int((band ^ expected).sum()), 200)
 
     def test_source_edge_falls_back_to_the_lifted_floor_contact_without_a_visible_step(self):
         masks, gray = self.carried_sheet(above_is_dark=True)         # dark load on a dark sheet: no edge to see

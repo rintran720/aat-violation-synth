@@ -43,7 +43,8 @@ class ValidToViolationTests(unittest.TestCase):
             selected = pipeline.selected_references(args)
             self.assertEqual(set(selected), set(pipeline.CLASSES))
             self.assertEqual(selected["LSP"], (root / "LSP.png").resolve())
-            self.assertEqual(pipeline.reference_cargo_size(args), [1.2, 1.0, 1.4])
+            self.assertEqual(pipeline.reference_size(args, "cargo"), [1.2, 1.0, 1.4])
+            self.assertIsNone(pipeline.reference_size(args, "SKID"))
 
     def test_aesthetic_gate_is_decided_by_scores(self) -> None:
         self.assertTrue(pipeline.aesthetic_gate(SCORED)[0])
@@ -64,17 +65,13 @@ class ValidToViolationTests(unittest.TestCase):
             self.assertTrue(pipeline.image_shape_ok(source, wide))
             self.assertFalse(pipeline.image_shape_ok(source, square))
 
-    def test_cargo_box_projects_a_3d_box_on_the_new_sheet(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            camera = Path(folder) / "camera.json"
-            # camera 5 m above the floor looking straight down, 1000 px focal length
-            camera.write_text(json.dumps({"width": 1000, "height": 1000, "K_norm": [[1, 0, .5], [0, 1, .5], [0, 0, 1]],
-                                          "matrix_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 5], [0, 0, 0, 1]]}))
-            geometry = {"new_lsp_top_world_m": [[-1, 0, 0], [1, 0, 0], [1, 2, 0], [-1, 2, 0]]}
-            box = pipeline.cargo_target_box(geometry, camera, [1.0, 1.0, 1.0])
-            # top of the 1 m box is 4 m from the camera: half width 0.5 m -> 125 px; centre at y = 1 m -> 250 px up
-            self.assertEqual(box, [375, 125, 625, 400])
-            self.assertIsNone(pipeline.cargo_target_box({}, camera, [1, 1, 1]))
+    def test_cargo_box_is_the_skid_footprint_centred_on_the_accepted_sheet(self) -> None:
+        # a 1.9 x 1.85 m sheet seen as 60 x 45 px, rear edge on top; a 1.2 x 1.0 m SKID centred on it; 1 m high,
+        # 10 px up in this view
+        outline = [[20, 50], [80, 50], [80, 95], [20, 95]]
+        box = pipeline.cargo_box_on_sheet(outline, [[20, 50], [80, 50]], [1.9, 1.85], [1.2, 1.0], 1.0,
+                                          lambda p, h: (p[0], p[1] - 10 * h))
+        self.assertEqual(box, [31, 50, 69, 85])
 
     def test_missing_api_key_fails_before_creating_output(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -96,6 +93,10 @@ class ValidToViolationTests(unittest.TestCase):
         source = root / "valid.png"
         Image.new("RGB", (120, 110), "gray").save(source)
         (root / "calibration.json").write_text(json.dumps({"lsp_measured_size_m": [1.9, 1.85]}))
+        (root / "config.json").write_text(json.dumps({"lsp_thickness_m": 0.09}))
+        (root / "camera.json").write_text(json.dumps({      # straight down from 5 m, 100 px focal length
+            "width": 120, "height": 110, "K_norm": [[100 / 120, 0, .5], [0, 100 / 110, .5], [0, 0, 1]],
+            "matrix_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 5], [0, 0, 0, 1]]}))
         refs = {}
         for category in pipeline.CLASSES:
             ref = root / f"{category}.png"
@@ -196,6 +197,7 @@ class ValidToViolationTests(unittest.TestCase):
             self.assertCountEqual(report["accepted_sheet_outline_px"], sheet)
             self.assertCountEqual(self.cargo_check.call_args.args[2], sheet)     # support is checked on the real sheet
             box = report["cargo_target"]["box_px"]
+            self.assertEqual(report["cargo_target"]["method"], "skid_footprint_on_sheet")
             self.assertTrue(62 < box[3] <= 105 and 34 < (box[0] + box[2]) / 2 < 95)   # cargo stands on it
             self.assertIn(str(report["accepted_sheet_outline_px"]), calls[1][2])
             self.assertNotIn(str(report["target_polygon_px"]), calls[1][2])

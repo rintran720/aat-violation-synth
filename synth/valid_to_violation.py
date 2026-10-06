@@ -15,9 +15,13 @@ runs only with --aesthetic-review, and then it gates too.
    candidate: orientation, width, depth, gap and lateral offset on the floor plane (one new instance, no cargo).
    A failed candidate goes back to Astra with its measured deviations, as a reference image beside the prompt:
    the retry edits the source frame again and corrects them (editing the failed candidate itself made it worse).
+   The original sheet is protected in the composite except its front band below the shared edge (its front side
+   face and the shadow under it): the slab in front hides that band.
 2. one CARGO on that sheet, starting every retry from the accepted sheet, with the same gates (support on the sheet,
    one instance, height, unchanged exposed deck). It works on the sheet as accepted (its SAM3 outline), not on the
-   projected one: the image model chose that sheet's depth.
+   projected one: the image model chose that sheet's depth. The cargo's target box is a SKID footprint centred on
+   that outline, sized by the LSP's and the SKID's real dimensions (reference map, else calibration and
+   DEFAULT_SKID_SIZE_M), raised by the cargo's height.
 References (forklift, LSP, SKID, cargo) are appearance only; by default Step A crops (work/refs/index.json),
 or a --reference-map, e.g. from synth.catalogue_reference_map (view-matched renders of the 3D catalogue). When the
 map gives the cargo's size_m, the cargo's target box is the projection of that 3D box. A failed gate never publishes.
@@ -42,8 +46,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from synth.vision_geometry import (MogePoints, Sam3Masks, added_sheet, bbox, edit_region, guide_marks, outline,
-                                   polygon_mask, preserve_outside, raw_drift, source_edge, union, verify_cargo_masks,
+from synth.vision_geometry import (MogePoints, Sam3Masks, added_sheet, below_line, edit_region, guide_marks, outline,
+                                   preserve_outside, raw_drift, sheet_at_edge, source_edge, union, verify_cargo_masks,
                                    verify_sheet_geometry, verify_unchanged, zoom_pair)
 
 
@@ -128,12 +132,17 @@ def selected_references(args: argparse.Namespace) -> dict[str, Path]:
     return selected
 
 
-def reference_cargo_size(args: argparse.Namespace) -> list[float] | None:
-    """The cargo model's size (x along the shared edge, y, z) in metres, when the reference map records one."""
+DEFAULT_SKID_SIZE_M = [1.2, 1.0, 0.13]      # the catalogue's single SKID, when the reference map gives no size
+DEFAULT_CARGO_HEIGHT_M = 1.0
+
+
+def reference_size(args: argparse.Namespace, category: str) -> list[float] | None:
+    """A reference object's size (x along the shared edge, y across, z height) in metres, when the reference map
+    records one."""
     manifest = getattr(args, "reference_map", None)
     if manifest is None:
         return None
-    item = json.loads(manifest.resolve().read_text()).get("cargo")
+    item = json.loads(manifest.resolve().read_text()).get(category)
     size = item.get("size_m") if isinstance(item, dict) else None
     return [float(v) for v in size] if size and len(size) == 3 else None
 
@@ -252,22 +261,43 @@ def make_geometry_guide(source: Path, contact_edge: list[list[int]], work: Path,
     return path
 
 
-def cargo_target_box(geometry: dict, camera_path: Path, size_m: list[float]) -> list[int] | None:
-    """Image box of a cargo of size_m (along the shared edge, across, height) standing centred on the new sheet's
-    top face: the projection of its 8 corners. None without the sheet's world corners."""
-    corners = geometry.get("new_lsp_top_world_m")
-    if not corners:
-        return None
-    camera = Camera(camera_path)
-    a, b, far_b, far_a = (np.asarray(p, dtype=float) for p in corners)
-    centre = (a + b + far_a + far_b) / 4
-    along = (b - a) / max(float(np.linalg.norm(b - a)), 1e-6)
-    across = (far_a - a) / max(float(np.linalg.norm(far_a - a)), 1e-6)
-    w, d, h = size_m
-    points = [centre + sx * w / 2 * along + sy * d / 2 * across + np.array([0, 0, z])
-              for sx in (-1, 1) for sy in (-1, 1) for z in (0., h)]
-    px = np.array([camera.project(p) for p in points])
-    return [int(px[:, 0].min()), int(px[:, 1].min()), int(px[:, 0].max()), int(px[:, 1].max())]
+def sheet_quad(outline: list[list[int]], edge: list[list[int]]) -> np.ndarray:
+    """The accepted sheet's four corners in the image, ordered rear-left, rear-right, front-right, front-left; the
+    rear corners are the two nearest the shared edge."""
+    import cv2
+    points = np.asarray(outline, dtype=np.float32)
+    epsilon = 2.
+    while len(points) > 4 and epsilon < 60:
+        points = cv2.approxPolyDP(np.asarray(outline, dtype=np.float32), epsilon, True).reshape(-1, 2)
+        epsilon *= 1.5
+    if len(points) != 4:
+        xs, ys = np.asarray(outline)[:, 0], np.asarray(outline)[:, 1]
+        points = np.array([[xs.min(), ys.min()], [xs.max(), ys.min()], [xs.max(), ys.max()], [xs.min(), ys.max()]], np.float32)
+    (ax, ay), (bx, by) = edge
+    distance = np.abs((points[:, 0] - ax) * (by - ay) - (points[:, 1] - ay) * (bx - ax)) / max(np.hypot(bx - ax, by - ay), 1e-6)
+    rear = sorted(np.argsort(distance)[:2], key=lambda i: points[i][0])
+    front = sorted([i for i in range(4) if i not in rear], key=lambda i: points[i][0])
+    return points[[rear[0], rear[1], front[1], front[0]]]
+
+
+def cargo_box_on_sheet(outline: list[list[int]], edge: list[list[int]], lsp_size_m: list[float],
+                       skid_size_m: list[float], height_m: float, raise_) -> list[int]:
+    """Image box of a cargo standing centred on the accepted sheet: the SKID's footprint on the sheet, placed by the
+    homography from the sheet's real size (lsp_size_m: along the shared edge, across) to its image corners, then
+    raised by height_m with raise_(pixel, metres) (the calibrated camera). No camera distance scale is involved:
+    the sheet itself is the ruler."""
+    import cv2
+    quad = sheet_quad(outline, edge)
+    w, d = float(lsp_size_m[0]), float(lsp_size_m[1])
+    homography = cv2.getPerspectiveTransform(np.array([[0, 0], [w, 0], [w, d], [0, d]], np.float32), quad)
+    sw, sd = float(skid_size_m[0]), float(skid_size_m[1])
+    footprint = np.array([[(w - sw) / 2, (d - sd) / 2], [(w + sw) / 2, (d - sd) / 2],
+                          [(w + sw) / 2, (d + sd) / 2], [(w - sw) / 2, (d + sd) / 2]], np.float32)
+    bottom = cv2.perspectiveTransform(footprint.reshape(-1, 1, 2), homography).reshape(-1, 2)
+    top = np.array([raise_(p, height_m) for p in bottom], dtype=float)
+    points = np.vstack([bottom, top])
+    return [int(np.floor(points[:, 0].min())), int(np.floor(points[:, 1].min())),
+            int(np.ceil(points[:, 0].max())), int(np.ceil(points[:, 1].max()))]
 
 
 def image_shape_ok(source: Path, candidate: Path) -> bool:
@@ -498,6 +528,7 @@ def main() -> int:
         with Image.open(source) as image:
             size = image.size
             gray = np.asarray(image.convert("L"))
+        thickness = float(json.loads((ROOT / "config.json").read_text())["lsp_thickness_m"])
         if args.contact_edge:
             values = [int(value.strip()) for value in args.contact_edge.split(",")]
             if (len(values) != 4 or values[0] >= values[2]
@@ -507,7 +538,6 @@ def main() -> int:
             anchor_info = {"method": "manual_override", "edge_observed": False}
         else:
             camera = Camera(camera_path)
-            thickness = float(json.loads((ROOT / "config.json").read_text())["lsp_thickness_m"])
             edge, anchor_info = source_edge(source_masks, size, gray, lambda pixel: camera.lift(pixel, thickness))
         report["anchor"] = {"contact_edge_px": edge, **anchor_info}
         save_report()
@@ -525,6 +555,14 @@ def main() -> int:
         save_report()
         protected = [union(source_masks.get(key, []), (size[1], size[0]))
                      for key in ("forklift", "cargo", "LSP")]
+        # the loaded sheet's front side face and the shadow under it lie below the shared edge, between its front
+        # corners; the new sheet in front hides them, so they are free to paint (everything else of the original
+        # stays pixel for pixel, including other sheets further down the frame)
+        loaded = sheet_at_edge(source_masks.get("LSP", []), edge)
+        if loaded is not None:
+            columns = np.arange(size[0])
+            span = (columns >= min(edge[0][0], edge[1][0]) - 15) & (columns <= max(edge[0][0], edge[1][0]) + 15)
+            protected[2] &= ~(below_line(loaded, edge, toward=np.mean(geometry["new_lsp_near_edge_px"], axis=0)) & span)
 
         # ---- stage 1: one empty LSP ----
         sheet_region = edit_region(size, polygon, "sheet")
@@ -593,31 +631,16 @@ def main() -> int:
         save_report()
 
         # ---- stage 2: one cargo on the new sheet ----
-        original_cargo = report["anchor"].get("cargo_bbox")
-        if original_cargo is None:
-            boxes = [box for box in (bbox(mask) for mask in source_masks.get("cargo", [])) if box is not None]
-            if boxes:
-                edge_x, edge_y = (edge[0][0] + edge[1][0]) / 2, (edge[0][1] + edge[1][1]) / 2
-                original_cargo = min(boxes, key=lambda box: abs((box[0] + box[2]) / 2 - edge_x) + abs(box[3] - edge_y))
-            else:
-                width_guess = edge[1][0] - edge[0][0]
-                original_cargo = [edge[0][0], edge[0][1] - width_guess, edge[1][0], edge[0][1]]
-        cargo_size = reference_cargo_size(args)
-        cargo_box = cargo_target_box(geometry, camera_path, cargo_size) if cargo_size else None
-        sheet_rows, sheet_columns = np.nonzero(sheet)
-        if cargo_box is not None:   # projected on the calibrated sheet: move it with the sheet as drawn
-            projected_rows, projected_columns = np.nonzero(polygon_mask(size, polygon))
-            dx = round(float(sheet_columns.mean() - projected_columns.mean()))
-            dy = round(float(sheet_rows.mean() - projected_rows.mean()))
-            cargo_box = [cargo_box[0] + dx, cargo_box[1] + dy, cargo_box[2] + dx, cargo_box[3] + dy]
-            report["cargo_target"] = {"method": "3d_box_projection", "size_m": cargo_size, "box_px": cargo_box}
-        else:   # no 3D size: scale the original load, its bottom a third of the sheet in from the near edge
-            cargo_height = original_cargo[3] - original_cargo[1]
-            floor_y = int(sheet_rows.max() - round(.35 * (sheet_rows.max() - sheet_rows.min())))
-            cargo_x = round(float(sheet_columns[sheet_rows == floor_y].mean()))
-            cargo_width = round((original_cargo[2] - original_cargo[0]) * 0.9)
-            cargo_box = [cargo_x - cargo_width // 2, floor_y - round(cargo_height * 1.05), cargo_x + cargo_width // 2, floor_y]
-            report["cargo_target"] = {"method": "scaled_original_cargo", "box_px": cargo_box}
+        # sized by the real LSP and SKID, not by the original load: the accepted sheet is the ruler
+        lsp_size = reference_size(args, "LSP") or [expected_width, calibrated_depth]
+        skid_size = reference_size(args, "SKID") or DEFAULT_SKID_SIZE_M
+        cargo_size = reference_size(args, "cargo")
+        cargo_height = cargo_size[2] if cargo_size else DEFAULT_CARGO_HEIGHT_M
+        camera = Camera(camera_path)
+        cargo_box = cargo_box_on_sheet(sheet_outline, edge, lsp_size, skid_size, cargo_height,
+                                       lambda pixel, metres: camera.project(camera.unproject(pixel, thickness) + np.array([0, 0, metres])))
+        report["cargo_target"] = {"method": "skid_footprint_on_sheet", "lsp_size_m": lsp_size[:2],
+                                  "skid_size_m": skid_size[:2], "height_m": cargo_height, "box_px": cargo_box}
         min_height = round((cargo_box[3] - cargo_box[1]) * 0.7)
         # The closer new cargo may correctly occlude part of the original load.
         # Preserve original cargo everywhere outside that planned occlusion box.
@@ -635,18 +658,20 @@ def main() -> int:
             else:
                 raw = work / f"cargo_raw_{attempt:02d}.png"
                 candidate = work / f"cargo_{attempt:02d}.png"
-                prompt = (f"Add exactly ONE UPRIGHT, FULL-SIZE cargo like Image 4 on the new empty LSP. Do not make a "
-                          "small parcel or a flat stack. Its approximate bounding box is "
-                          f"{cargo_box} in the {size[0]}x{size[1]} source image, with its bottom on the deck. Keep the "
-                          "cargo fully within the LSP footprint at the bottom, leave the two LSP junction side ends "
-                          "visible, and match lighting and contact shadow. The nearer cargo may naturally occlude the "
-                          "load behind it. Render a single coherent cargo surface without a triangular patch or dark "
-                          "strip at its bottom. Do not move either LSP, the forklift or the background. The new "
-                          f"LSP's outline in source pixels: {sheet_outline}. " + APPEARANCE_ONLY + " " + feedback)
+                prompt = (f"Add exactly ONE UPRIGHT, FULL-SIZE cargo like Image 4 on the new empty LSP, standing on a "
+                          "SKID like Image 3. Do not make a small parcel or a flat stack. Its footprint is the SKID's "
+                          f"({skid_size[0]:.1f} x {skid_size[1]:.1f} m on a {lsp_size[0]:.1f} x {lsp_size[1]:.1f} m LSP), "
+                          f"centred on the new LSP, and its approximate bounding box is {cargo_box} in the "
+                          f"{size[0]}x{size[1]} source image, with its bottom on the deck. Keep the cargo fully within "
+                          "the LSP footprint at the bottom, leave the two LSP junction side ends visible, and match "
+                          "lighting and contact shadow. The nearer cargo may naturally occlude the load behind it. "
+                          "Render a single coherent cargo surface without a triangular patch or dark strip at its "
+                          "bottom. Do not move either LSP, the forklift or the background. The new LSP's outline in "
+                          f"source pixels: {sheet_outline}. " + APPEARANCE_ONLY + " " + feedback)
                 count_call(report, f"image edit - add cargo ({editor_name})")
-                guided_edit(args, [accepted_sheet, source, refs["LSP"], refs["cargo"], guide],
+                guided_edit(args, [accepted_sheet, source, refs["SKID"], refs["cargo"], guide],
                             ["Image 1 geometry-accepted empty LSP", "Image 2 original valid source",
-                             f"Image 3 {ref_name} LSP appearance", f"Image 4 {ref_name} cargo appearance",
+                             f"Image 3 {ref_name} SKID appearance", f"Image 4 {ref_name} cargo appearance",
                              "Image 5 geometry guide"], prompt, raw, work)
                 preserve_outside(accepted_sheet, raw, candidate, cargo_region, cargo_protected)
             candidate_masks = segmenter.get(candidate, ("LSP", "cargo"))
