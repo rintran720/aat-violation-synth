@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Violation Generator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  /* Layout: a workbench. Left, the setup steps in the order they are done (sticky on wide screens);
+     right, the job: one summary strip, then the outputs as they arrive. The accent is the chosen engine's
+     own colour from the engine configuration. */
+  :root {
+    --ground: #eef1f4;      /* cool concrete grey, biased slightly blue like the CCTV frames */
+    --surface: #ffffff;
+    --sunken: #e4e8ed;
+    --ink: #17202b;
+    --ink-soft: #566273;
+    --rule: #d3d9e1;
+    --engine: #960399;      /* replaced by the selected engine's colour */
+    --engine-text: var(--engine);
+    --on-engine: #ffffff;
+    --ok: #237a43;  --ok-soft: #dff1e5;
+    --bad: #b42323; --bad-soft: #f8e1e1;
+    --run: #1f62b5; --run-soft: #dde9f8;
+    --wait: #6b7480; --wait-soft: #e6e9ee;
+    --warn: #8a5a00; --warn-soft: #f6ecd6;
+    --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
+    --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    --step-0: 0.8125rem; --step-1: 0.875rem; --step-2: 1rem; --step-3: 1.25rem; --step-4: 1.625rem;
+    --radius: 8px;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #11161d; --surface: #19202a; --sunken: #222a36; --ink: #e5e9ef; --ink-soft: #9aa5b4;
+      --rule: #2d3644; --engine-text: color-mix(in oklab, var(--engine) 55%, white);
+      --ok: #6fd18f; --ok-soft: #173525; --bad: #ff8c8c; --bad-soft: #3d1c1e; --run: #7db4f5; --run-soft: #172c45;
+      --wait: #9aa5b4; --wait-soft: #252d39; --warn: #f0c060; --warn-soft: #3a2f16;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #11161d; --surface: #19202a; --sunken: #222a36; --ink: #e5e9ef; --ink-soft: #9aa5b4;
+    --rule: #2d3644; --engine-text: color-mix(in oklab, var(--engine) 55%, white);
+    --ok: #6fd18f; --ok-soft: #173525; --bad: #ff8c8c; --bad-soft: #3d1c1e; --run: #7db4f5; --run-soft: #172c45;
+    --wait: #9aa5b4; --wait-soft: #252d39; --warn: #f0c060; --warn-soft: #3a2f16;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  [hidden] { display: none !important; }
+  body { background: var(--ground); color: var(--ink); font: 400 var(--step-1)/1.5 var(--font-body); }
+  main { max-width: 1360px; margin: 0 auto; padding-inline: 16px; padding-block: 20px 64px; }
+  :focus-visible { outline: 2px solid var(--engine-text); outline-offset: 2px; }
+  code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+
+  header.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 20px;
+               padding-bottom: 16px; margin-bottom: 20px; border-bottom: 1px solid var(--rule); }
+  header.top h1 { font: 600 var(--step-4)/1.1 var(--font-display); letter-spacing: .01em; margin: 0; text-wrap: balance; }
+  header.top p { margin: 0; color: var(--ink-soft); max-width: 62ch; }
+
+  .bench { display: grid; grid-template-columns: minmax(320px, 400px) minmax(0, 1fr); gap: 24px; align-items: start; }
+  @media (max-width: 960px) { .bench { grid-template-columns: minmax(0, 1fr); } }
+  .setup { display: grid; gap: 12px; min-width: 0; }
+  @media (min-width: 961px) { .setup { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); } }
+
+  .step { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 14px 16px 16px; }
+  .step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .step-no { flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+             font: 600 var(--step-0) var(--font-display); background: var(--sunken); color: var(--ink-soft); }
+  .step.ready .step-no { background: var(--engine); color: var(--on-engine); }
+  .step-head h2 { margin: 0; font: 600 var(--step-2)/1.2 var(--font-display); letter-spacing: .02em; }
+
+  .field { display: block; font-weight: 600; margin-bottom: 6px; font-size: var(--step-1); }
+  .help { color: var(--ink-soft); font-size: var(--step-0); margin-top: 6px; }
+  input[type=text], input[type=number], select {
+    width: 100%; padding: 8px 10px; font: inherit; color: var(--ink); background: var(--ground);
+    border: 1px solid var(--rule); border-radius: 6px; }
+  input[type=number] { width: 96px; font-variant-numeric: tabular-nums; }
+
+  .seg { display: grid; grid-template-columns: repeat(3, 1fr); background: var(--sunken); border-radius: 7px; padding: 3px;
+         gap: 3px; margin-bottom: 12px; }
+  .seg button { border: 0; background: transparent; color: var(--ink-soft); padding: 6px 4px; border-radius: 5px;
+                font: 500 var(--step-0) var(--font-body); cursor: pointer; }
+  .seg button[aria-selected="true"] { background: var(--surface); color: var(--ink); font-weight: 600;
+                                      box-shadow: 0 1px 2px rgba(15, 23, 32, .12); }
+
+  .drop { border: 1.5px dashed var(--rule); border-radius: 7px; padding: 12px; text-align: center; color: var(--ink-soft);
+          cursor: pointer; font-size: var(--step-0); background: var(--ground); }
+  .drop:hover, .drop.over { border-color: var(--engine-text); color: var(--engine-text); }
+  .drop strong { color: var(--ink); font-weight: 600; }
+
+  .kinds { display: grid; gap: 8px; }
+  .kind { border: 1px solid var(--rule); border-radius: 7px; padding: 10px 12px; display: grid; gap: 8px; }
+  .kind-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .kind-head code { font-weight: 500; overflow-wrap: anywhere; }
+  .kind-count { font-variant-numeric: tabular-nums; color: var(--ink-soft); font-size: var(--step-0); white-space: nowrap; }
+  .kind-count button { border: 0; background: none; color: var(--engine-text); font: inherit; cursor: pointer; padding: 0; }
+  .kind.unused { opacity: .5; }
+  .kind.unused .drop { cursor: not-allowed; }
+
+  .map { width: 100%; border-collapse: collapse; font-size: var(--step-0); margin-top: 14px; }
+  .map th { text-align: left; font-weight: 600; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .06em;
+            font-size: 11px; padding-bottom: 4px; }
+  .map td { padding: 5px 0; border-top: 1px solid var(--rule); vertical-align: top; }
+  .map td code { white-space: nowrap; }
+  .map td:last-child { padding-left: 10px; }
+  .map tr.unused td { color: var(--ink-soft); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+
+  .cases { display: grid; gap: 8px; margin-top: 12px; }
+  .case { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; padding: 10px 12px; cursor: pointer;
+          border: 1px solid var(--rule); border-radius: 7px; }
+  .case:has(input:checked) { border-color: var(--engine-text); background: color-mix(in oklab, var(--engine) 7%, var(--surface)); }
+  .case input { margin: 3px 0 0; accent-color: var(--engine); }
+  .case-title { font-weight: 600; }
+  .case-meta { grid-column: 2; color: var(--ink-soft); font-size: var(--step-0); }
+  .tag { display: inline-block; font: 600 11px/1.6 var(--font-body); padding: 0 7px; border-radius: 99px; margin-left: 6px;
+         background: var(--warn-soft); color: var(--warn); vertical-align: 1px; }
+  .none { color: var(--ink-soft); font-style: italic; margin-top: 12px; }
+
+  .estimate { font-variant-numeric: tabular-nums; color: var(--ink-soft); font-size: var(--step-0); margin: 10px 0 0; }
+  button.go { width: 100%; margin-top: 12px; padding: 11px; border: 0; border-radius: 7px; cursor: pointer;
+              background: var(--engine); color: var(--on-engine); font: 600 var(--step-2) var(--font-display); letter-spacing: .02em; }
+  button.go:disabled { background: var(--sunken); color: var(--ink-soft); cursor: not-allowed; }
+  .problem { margin-top: 10px; padding: 9px 11px; border-radius: 6px; background: var(--bad-soft); color: var(--bad);
+             font-size: var(--step-0); white-space: pre-wrap; }
+
+  .run { display: grid; gap: 14px; min-width: 0; }
+  .summary { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 14px 16px; }
+  .summary-top { display: flex; flex-wrap: wrap; gap: 10px 16px; justify-content: space-between; align-items: center; }
+  .summary h2 { margin: 0; font: 600 var(--step-3)/1.2 var(--font-display); font-variant-numeric: tabular-nums; }
+  .summary .sub { color: var(--ink-soft); font-size: var(--step-0); }
+  .live { display: inline-flex; align-items: center; gap: 6px; }
+  .live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--wait); }
+  .live.on::before { background: var(--ok); }
+  .live.lost { color: var(--bad); }
+  .live.lost::before { background: var(--bad); }
+  .meter { height: 6px; border-radius: 99px; background: var(--sunken); overflow: hidden; display: flex; margin: 12px 0 10px; }
+  .meter span { height: 100%; transition: width .3s ease; }
+  .meter .m-done { background: var(--ok); } .meter .m-failed { background: var(--bad); } .meter .m-running { background: var(--run); }
+  .tally { display: flex; flex-wrap: wrap; gap: 6px; }
+  .filter { border: 1px solid var(--rule); background: var(--surface); color: var(--ink); border-radius: 99px; padding: 3px 11px;
+            font: 500 var(--step-0) var(--font-body); cursor: pointer; font-variant-numeric: tabular-nums; }
+  .filter[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+  .notes { margin: 10px 0 0; padding: 8px 12px 8px 28px; border-radius: 6px; background: var(--warn-soft); color: var(--warn);
+           font-size: var(--step-0); }
+  a.btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; border-radius: 6px; text-decoration: none;
+          border: 1px solid var(--rule); background: var(--surface); color: var(--ink); font: 600 var(--step-0) var(--font-body); }
+  a.btn.primary { background: var(--engine); border-color: var(--engine); color: var(--on-engine); }
+  a.btn[aria-disabled="true"] { pointer-events: none; background: var(--sunken); border-color: var(--rule); color: var(--ink-soft); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+  .card { background: var(--surface); border: 1px solid var(--rule); border-top: 3px solid var(--wait); border-radius: var(--radius);
+          overflow: hidden; display: grid; grid-template-rows: auto 1fr auto; min-width: 0; }
+  .card.running { border-top-color: var(--run); } .card.done { border-top-color: var(--ok); } .card.failed { border-top-color: var(--bad); }
+  .shot { aspect-ratio: 16 / 9; max-width: 100%; background: var(--sunken); display: grid; place-items: center;
+          color: var(--ink-soft); font-size: var(--step-0); }
+  .shot img { width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in; }
+  .card-body { padding: 10px 12px 4px; display: grid; gap: 2px; min-width: 0; }
+  .card-title { font-weight: 600; }
+  .card-title .mono { color: var(--ink-soft); font-weight: 400; }
+  .card-file { font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft); overflow-wrap: anywhere; }
+  .card-error { color: var(--bad); font-size: var(--step-0); overflow-wrap: anywhere; margin-top: 4px; }
+  .card-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 12px 12px; }
+  .chip { font: 600 11px/1.7 var(--font-body); padding: 0 8px; border-radius: 99px; text-transform: uppercase; letter-spacing: .05em;
+          font-variant-numeric: tabular-nums; background: var(--wait-soft); color: var(--wait); }
+  .chip.running { background: var(--run-soft); color: var(--run); } .chip.done { background: var(--ok-soft); color: var(--ok); }
+  .chip.failed { background: var(--bad-soft); color: var(--bad); }
+  .spin { width: 22px; height: 22px; border-radius: 50%; border: 3px solid var(--rule); border-top-color: var(--run);
+          animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } .meter span { transition: none; } }
+
+  .start { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 18px 20px;
+           display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .start h2 { margin: 0 0 8px; font: 600 var(--step-3)/1.2 var(--font-display); }
+  .start p { margin: 0 0 10px; color: var(--ink-soft); max-width: 60ch; }
+  .tree-wrap { overflow-x: auto; min-width: 0; }
+  pre.tree { margin: 0; padding: 12px 14px; background: var(--ground); border: 1px solid var(--rule); border-radius: 7px;
+             font: 400 12.5px/1.7 var(--font-mono); color: var(--ink); }
+  pre.tree .c { color: var(--ink-soft); }
+  ol.how { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+
+  dialog { border: 0; padding: 0; background: transparent; max-width: 96vw; }
+  dialog::backdrop { background: rgba(8, 12, 18, .82); }
+  .viewer { display: grid; gap: 8px; justify-items: end; }
+  .viewer img { max-width: 96vw; max-height: 84vh; display: block; border-radius: 6px; }
+  .viewer-bar { display: flex; gap: 8px; }
+  .viewer-bar button { border: 1px solid var(--rule); background: var(--surface); color: var(--ink); border-radius: 6px;
+                       padding: 7px 12px; font: 600 var(--step-0) var(--font-body); cursor: pointer; }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>Violation Generator</h1>
+    <p>Turns valid CCTV frames into violation images. Each output is one Astra edit; three run at a time and each
+      appears here as soon as it is ready.</p>
+  </header>
+
+  <div class="bench">
+    <form id="form" class="setup" autocomplete="off" novalidate>
+      <section class="step" id="stepInput">
+        <div class="step-head"><span class="step-no">1</span><h2>Input frames</h2></div>
+        <div class="seg" role="tablist" aria-label="How to give the input">
+          <button type="button" role="tab" id="tabFolder" data-mode="folder" aria-selected="true">Folder path</button>
+          <button type="button" role="tab" id="tabUpload" data-mode="upload" aria-selected="false">Upload by kind</button>
+          <button type="button" role="tab" id="tabZip" data-mode="zip" aria-selected="false">Zip file</button>
+        </div>
+        <div data-pane="folder">
+          <label class="field" for="folder">Folder on the server</label>
+          <input id="folder" type="text" placeholder="work/inputs/cam01" spellcheck="false">
+          <div class="help">Absolute, or relative to the repository. It must contain the input-kind folders listed below.</div>
+        </div>
+        <div data-pane="upload" hidden>
+          <div class="kinds" id="kindUploads"></div>
+        </div>
+        <div data-pane="zip" hidden>
+          <div class="drop" id="zipDrop" tabindex="0" role="button"><strong>Drop a .zip</strong> or click to choose
+            <input id="zipFile" type="file" accept=".zip" hidden></div>
+          <div class="help" id="zipName">The zip holds the input-kind folders, at its top or inside one folder.</div>
+        </div>
+        <table class="map" aria-label="Input kinds">
+          <thead><tr><th>Folder name</th><th>Feeds engine</th></tr></thead>
+          <tbody id="kindMap"></tbody>
+        </table>
+      </section>
+
+      <section class="step" id="stepEngine">
+        <div class="step-head"><span class="step-no">2</span><h2>Engine and violation cases</h2></div>
+        <label class="field" for="engine">Engine</label>
+        <select id="engine"></select>
+        <div id="cases" class="cases"></div>
+      </section>
+
+      <section class="step" id="stepGo">
+        <div class="step-head"><span class="step-no">3</span><h2>Variants and generate</h2></div>
+        <label class="field" for="variants">Outputs per frame and case</label>
+        <input id="variants" type="number" min="1" max="10" value="1">
+        <div class="help">Each variant is its own Astra edit with other catalogue LSP / SKID references.</div>
+        <p class="estimate" id="estimate"></p>
+        <button id="go" class="go" type="submit">Generate</button>
+        <div id="problem" class="problem" hidden></div>
+      </section>
+    </form>
+
+    <section class="run" aria-live="polite">
+      <div class="start" id="start">
+        <div>
+          <h2>How inputs are sorted</h2>
+          <p>Put each frame in the folder of what it shows. A job uses only the folders of the engine you choose, and
+            every case says which kinds it can turn into a violation.</p>
+          <ol class="how">
+            <li>Give the frames: a folder path, a zip, or uploads per kind.</li>
+            <li>Choose the engine and its violation cases.</li>
+            <li>Set the variants and generate. Outputs arrive here one by one.</li>
+          </ol>
+        </div>
+        <div class="tree-wrap">
+<pre class="tree">cam01/                         <span class="c">← folder path, or the zip</span>
+├─ forklift-with-lsp-cargo/    <span class="c">→ Pushing Multiple Lsps</span>
+│  ├─ frame_0145.jpg
+│  └─ frame_0517.jpg
+├─ forklift-with-lsp-empty/    <span class="c">→ Pushing Multiple Lsps</span>
+├─ forklift-with-cargo-no-lsp/ <span class="c">→ Charging Multiple Skids</span>
+└─ forklift-empty/             <span class="c">→ Charging Multiple Skids</span></pre>
+        </div>
+      </div>
+
+      <div class="summary" id="summary" hidden>
+        <div class="summary-top">
+          <div>
+            <h2 id="jobTitle"></h2>
+            <div class="sub"><span id="jobMeta"></span> · <span class="live" id="live"></span></div>
+          </div>
+          <a id="zipAll" class="btn primary" href="#" aria-disabled="true">Download all</a>
+        </div>
+        <div class="meter" aria-hidden="true"><span class="m-done"></span><span class="m-failed"></span><span class="m-running"></span></div>
+        <div class="tally" id="tally" role="group" aria-label="Show outputs"></div>
+        <ul class="notes" id="notes" hidden></ul>
+      </div>
+      <div class="grid" id="grid"></div>
+    </section>
+  </div>
+</main>
+
+<dialog id="viewer">
+  <div class="viewer">
+    <img alt="">
+    <div class="viewer-bar"><a class="btn primary" id="viewerDownload" href="#" download>Download</a>
+      <button type="button" id="viewerClose">Close</button></div>
+  </div>
+</dialog>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const STATUS = ["done", "running", "queued", "failed"];
+const LABEL = { done: "Done", running: "Running", queued: "Waiting", failed: "Failed" };
+let kinds = [], engines = [], mode = "folder", uploads = {}, zipFile = null;
+let job = null, socket = null, closedByUs = false, filter = "all";
+
+// ---------- setup ----------
+function engine() { return engines.find((e) => e.id === $("#engine").value); }
+function engineName(id) { return (engines.find((e) => e.id === id) || {}).name || id; }
+function kindEngine(kind) { return kinds.find((k) => k.id === kind)?.engine; }
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+document.querySelectorAll(".seg button").forEach((b) => b.addEventListener("click", () => {
+  mode = b.dataset.mode;
+  document.querySelectorAll(".seg button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
+  document.querySelectorAll("[data-pane]").forEach((p) => p.hidden = p.dataset.pane !== mode);
+  refresh();
+}));
+
+function dropZone(zone, input, onFiles, enabled = () => true) {
+  zone.addEventListener("click", (e) => { if (e.target !== input && enabled()) input.click(); });
+  zone.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && enabled()) { e.preventDefault(); input.click(); } });
+  zone.addEventListener("dragover", (e) => { e.preventDefault(); if (enabled()) zone.classList.add("over"); });
+  zone.addEventListener("dragleave", () => zone.classList.remove("over"));
+  zone.addEventListener("drop", (e) => { e.preventDefault(); zone.classList.remove("over"); if (enabled()) onFiles(e.dataTransfer.files); });
+  input.addEventListener("change", () => { onFiles(input.files); input.value = ""; });
+}
+dropZone($("#zipDrop"), $("#zipFile"), (files) => {
+  const f = [...files].find((x) => /\.zip$/i.test(x.name));
+  if (!f) return;
+  zipFile = f;
+  $("#zipName").textContent = `${f.name} · ${(f.size / 1e6).toFixed(1)} MB`;
+  refresh();
+});
+
+function renderKinds() {
+  const current = engine();
+  $("#kindMap").innerHTML = kinds.map((k) => {
+    const e = engines.find((x) => x.id === k.engine) || {};
+    return `<tr class="${k.engine === current?.id ? "" : "unused"}"><td><code>${esc(k.id)}</code></td>
+      <td><span class="dot" style="background:${esc(e.color)}"></span>${esc(e.name)}</td></tr>`;
+  }).join("");
+  $("#kindUploads").innerHTML = kinds.map((k) => {
+    const used = k.engine === current?.id;
+    return `<div class="kind ${used ? "" : "unused"}">
+      <div class="kind-head"><code>${esc(k.id)}</code><span class="kind-count" data-count="${k.id}"></span></div>
+      <div class="drop" data-kind="${k.id}" role="button" tabindex="${used ? 0 : -1}" aria-disabled="${!used}">
+        ${used ? `<strong>Drop images</strong> or click to choose` : `Used by ${esc(engineName(k.engine))}`}
+        <input type="file" accept=".jpg,.jpeg,.png" multiple hidden></div></div>`;
+  }).join("");
+  document.querySelectorAll("#kindUploads .drop").forEach((zone) => {
+    const kind = zone.dataset.kind;
+    dropZone(zone, zone.querySelector("input"), (files) => {
+      uploads[kind] = (uploads[kind] || []).concat([...files].filter((f) => /\.(jpe?g|png)$/i.test(f.name)));
+      showCounts(); refresh();
+    }, () => kindEngine(kind) === engine()?.id);
+  });
+  showCounts();
+}
+function showCounts() {
+  for (const k of kinds) {
+    const el = document.querySelector(`[data-count="${k.id}"]`);
+    if (!el) continue;
+    const n = (uploads[k.id] || []).length;
+    el.innerHTML = n ? `${plural(n, "image")} · <button type="button" data-clear="${k.id}">Clear</button>` : "no images";
+  }
+  document.querySelectorAll("[data-clear]").forEach((b) => b.addEventListener("click", () => {
+    delete uploads[b.dataset.clear]; showCounts(); refresh();
+  }));
+}
+
+function renderCases() {
+  const e = engine();
+  document.documentElement.style.setProperty("--engine", e?.color || "#960399");
+  const box = $("#cases");
+  if (!e || !e.cases.length) {
+    box.innerHTML = `<div class="none">This engine has no violation cases yet.</div>`;
+  } else {
+    const tags = { pending_rule: ["Rule to confirm", "Whether this counts as a violation is still to be confirmed"],
+                   draft: ["Draft", "Our own case; not in the scenario catalogue yet"] };
+    box.innerHTML = e.cases.map((c, i) => `
+      <label class="case" for="case-${c.id}">
+        <input type="checkbox" id="case-${c.id}" name="case" value="${c.id}" ${i === 0 ? "checked" : ""}>
+        <span><span class="case-title">${esc(c.title)}</span>${tags[c.status] ? `<span class="tag" title="${tags[c.status][1]}">${tags[c.status][0]}</span>` : ""}</span>
+        <span class="case-meta">${c.catalogue !== "-" ? `${esc(c.catalogue)} · ` : ""}from ${c.input_kinds.map((k) => `<code>${esc(k)}</code>`).join(", ")}</span>
+      </label>`).join("");
+    box.querySelectorAll("input").forEach((i) => i.addEventListener("change", refresh));
+  }
+  renderKinds();
+  refresh();
+}
+$("#engine").addEventListener("change", renderCases);
+$("#variants").addEventListener("input", refresh);
+$("#folder").addEventListener("input", refresh);
+function chosen() { return [...document.querySelectorAll("input[name=case]:checked")].map((i) => i.value); }
+
+function refresh() {
+  const e = engine(), cases = chosen(), variants = Math.min(10, Math.max(1, +$("#variants").value || 1));
+  let inputReady, outputs = null, text;
+  if (mode === "upload") {
+    let frames = 0;
+    outputs = 0;
+    for (const [kind, files] of Object.entries(uploads)) {
+      if (!e || kindEngine(kind) !== e.id) continue;
+      const n = e.cases.filter((c) => cases.includes(c.id) && c.input_kinds.includes(kind)).length;
+      frames += files.length; outputs += files.length * n * variants;
+    }
+    inputReady = frames > 0;
+    text = frames ? `${plural(frames, "frame")} → ${plural(outputs, "output")}` : "Add images to a kind this engine uses.";
+  } else {
+    inputReady = mode === "zip" ? !!zipFile : !!$("#folder").value.trim();
+    text = `${plural(cases.length, "case")} × ${plural(variants, "variant")} for each frame in `
+      + (e ? e.input_kinds.join(" and ") : "-");
+  }
+  const ready = !!e && cases.length > 0 && inputReady && outputs !== 0;
+  $("#estimate").textContent = text;
+  $("#go").textContent = outputs ? `Generate ${plural(outputs, "output")}` : "Generate";
+  $("#go").disabled = !ready;
+  $("#stepInput").classList.toggle("ready", inputReady);
+  $("#stepEngine").classList.toggle("ready", cases.length > 0);
+  $("#stepGo").classList.toggle("ready", ready);
+}
+
+$("#form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const problem = $("#problem"); problem.hidden = true;
+  const data = new FormData();
+  data.append("engine", $("#engine").value);
+  chosen().forEach((c) => data.append("cases", c));
+  data.append("variants", $("#variants").value);
+  if (mode === "upload") {
+    for (const [kind, files] of Object.entries(uploads))
+      if (kindEngine(kind) === engine()?.id) files.forEach((f) => data.append(`files:${kind}`, f, f.name));
+  } else if (mode === "zip") data.append("zip", zipFile, zipFile.name);
+  else data.append("folder", $("#folder").value.trim());
+  const go = $("#go"); go.disabled = true; go.textContent = "Starting…";
+  try {
+    const res = await fetch("/api/jobs", { method: "POST", body: data });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `The service answered ${res.status}.`);
+    openJob(body);
+  } catch (err) {
+    problem.textContent = String(err.message || err); problem.hidden = false;
+  } finally { refresh(); }
+});
+
+// ---------- job ----------
+function openJob(state) {
+  job = state; filter = "all";
+  try { history.replaceState(null, "", `#job=${job.id}`); } catch (_) {}
+  $("#start").hidden = true; $("#summary").hidden = false;
+  renderJob(); connect();
+}
+function connect() {
+  if (socket) { closedByUs = true; socket.close(); }
+  closedByUs = false;
+  const id = job.id;
+  socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/jobs/${id}`);
+  socket.onopen = () => live("Live", "on");
+  socket.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (!job || job.id !== id) return;
+    if (msg.type === "job") { job = msg.job; renderJob(); }
+    else if (msg.type === "task") updateTask(msg.task);
+    else if (msg.type === "error") live(msg.error, "lost");
+  };
+  socket.onclose = () => {
+    if (closedByUs || !job || job.id !== id) return;
+    if (job.finished) { live("Finished", ""); return; }
+    live("Connection lost, reconnecting", "lost");
+    setTimeout(() => { if (job && job.id === id && !job.finished) connect(); }, 2000);
+  };
+}
+function live(text, state) { const el = $("#live"); el.textContent = text; el.className = `live ${state}`; }
+
+function updateTask(task) {
+  const i = job.tasks.findIndex((t) => t.id === task.id);
+  if (i < 0) return;
+  job.tasks[i] = task;
+  const c = { queued: 0, running: 0, done: 0, failed: 0 };
+  job.tasks.forEach((t) => c[t.status]++);
+  job.counts = c; job.finished = !c.queued && !c.running;
+  renderSummary();
+  const old = document.getElementById(`card-${task.id}`);
+  if (old) old.replaceWith(card(task));
+  applyFilter();
+}
+function renderJob() {
+  renderSummary();
+  const grid = $("#grid"); grid.innerHTML = "";
+  job.tasks.forEach((t) => grid.appendChild(card(t)));
+  applyFilter();
+}
+function renderSummary() {
+  const c = job.counts, total = job.total, e = engines.find((x) => x.id === job.engine);
+  if (e) document.documentElement.style.setProperty("--engine", e.color);
+  $("#jobTitle").textContent = job.finished ? `${c.done} of ${total} outputs ready` : `${c.done + c.failed} of ${total} outputs made`;
+  const inputs = Object.entries(job.inputs || {}).map(([k, n]) => `${n} ${k}`).join(", ");
+  $("#jobMeta").textContent = `${job.engine_name} · ${inputs}`;
+  if (job.finished) live("Finished", "");
+  const pct = (n) => `${(100 * n / Math.max(total, 1)).toFixed(2)}%`;
+  document.querySelector(".m-done").style.width = pct(c.done);
+  document.querySelector(".m-failed").style.width = pct(c.failed);
+  document.querySelector(".m-running").style.width = pct(c.running);
+  $("#tally").innerHTML = [["all", "All", total], ...STATUS.map((s) => [s, LABEL[s], c[s]])]
+    .filter(([s, , n]) => s === "all" || n > 0)
+    .map(([s, label, n]) => `<button type="button" class="filter" data-filter="${s}" aria-pressed="${filter === s}">${label} ${n}</button>`).join("");
+  document.querySelectorAll(".filter").forEach((b) => b.addEventListener("click", () => { filter = b.dataset.filter; renderSummary(); applyFilter(); }));
+  const zip = $("#zipAll"), ready = job.finished && c.done > 0;
+  zip.setAttribute("aria-disabled", String(!ready));
+  zip.href = ready ? `/api/jobs/${job.id}/download.zip` : "#";
+  zip.textContent = job.finished ? `Download all ${c.done} (.zip)` : "Download all when finished";
+  const notes = $("#notes");
+  notes.hidden = !(job.notes && job.notes.length);
+  notes.innerHTML = (job.notes || []).map((n) => `<li>${esc(n)}</li>`).join("");
+}
+function applyFilter() {
+  document.querySelectorAll(".card").forEach((el) => el.hidden = filter !== "all" && !el.classList.contains(filter));
+}
+function card(t) {
+  const el = document.createElement("article");
+  el.className = `card ${t.status}`; el.id = `card-${t.id}`;
+  const shot = t.status === "done" ? `<img src="${esc(t.thumb || t.url)}" alt="${esc(t.case_title)} from ${esc(t.input)}" loading="lazy">`
+    : t.status === "running" ? `<div class="spin" role="img" aria-label="Running"></div>`
+    : t.status === "failed" ? "No output" : "Waiting for a free thread";
+  el.innerHTML = `<div class="shot">${shot}</div>
+    <div class="card-body"><div class="card-title">${esc(t.case_title)} <span class="mono">v${t.variant}</span></div>
+      <div class="card-file">${esc(t.input_kind)}/${esc(t.input)}</div>
+      ${t.status === "failed" ? `<div class="card-error">${esc(t.error || "No output")}</div>` : ""}</div>
+    <div class="card-foot"><span class="chip ${t.status}">${LABEL[t.status]}${t.seconds ? ` · ${t.seconds} s` : ""}</span>
+      ${t.status === "done" ? `<a class="btn" href="${esc(t.url)}" download="${esc(t.output_name)}">Download</a>` : ""}</div>`;
+  const img = el.querySelector("img");
+  if (img) img.addEventListener("click", () => {
+    $("#viewer img").src = t.url; $("#viewer img").alt = img.alt;
+    $("#viewerDownload").href = t.url; $("#viewerDownload").setAttribute("download", t.output_name);
+    $("#viewer").showModal();
+  });
+  return el;
+}
+$("#viewerClose").addEventListener("click", () => $("#viewer").close());
+$("#viewer").addEventListener("click", (e) => { if (e.target.id === "viewer") $("#viewer").close(); });
+
+(async () => {
+  try {
+    const data = await (await fetch("/api/engines")).json();
+    kinds = data.input_kinds; engines = data.engines;
+  } catch (err) {
+    $("#problem").textContent = "The service did not answer. Start it, then reload this page."; $("#problem").hidden = false;
+    return;
+  }
+  $("#engine").innerHTML = engines.map((e) => `<option value="${e.id}">${esc(e.name)}</option>`).join("");
+  renderCases();
+  const m = location.hash.match(/job=([\w-]+)/);
+  if (m) {
+    const res = await fetch(`/api/jobs/${m[1]}`);
+    if (res.ok) openJob(await res.json());
+  }
+})();
+</script>
+</body>
+</html>
