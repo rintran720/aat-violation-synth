@@ -20,6 +20,9 @@ PROMPTS = {
     "floor": ("floor",),
 }
 GUIDE_COLOURS = ((0, 255, 70),)   # line colour of the geometry guide image
+# SAM3 gives a probability per pixel (bilinear from its 1008 px map); the mask is where it exceeds this. The
+# probability maps are cached so the figure can change without running the model again.
+MASK_PROB = 0.5
 
 
 def union(masks: list[np.ndarray], shape: tuple[int, int]) -> np.ndarray:
@@ -71,20 +74,37 @@ class Sam3Masks:
                 state = self.processor.set_image(image.convert("RGB"))
             for key in missing:
                 masks: list[np.ndarray] = []
+                probs: list[np.ndarray] = []
                 for prompt in PROMPTS[key]:
                     with autocast:
                         output = self.processor.set_text_prompt(state=state, prompt=prompt)
-                    for mask, score in zip(output["masks"], output["scores"]):
+                    for prob, score in zip(output["masks_logits"], output["scores"]):
                         if float(score) < 0.5:
                             continue
-                        array = np.asarray(mask.detach().cpu().float()).squeeze() > 0.5
+                        prob = np.asarray(prob.detach().cpu().float()).squeeze()
+                        array = prob > MASK_PROB
                         if not any((array & old).sum() > 0.7 * min(array.sum(), old.sum()) for old in masks):
                             masks.append(array)
+                            probs.append(prob.astype(np.float16))
                 np.savez_compressed(folder / f"{key}.npz", *masks)
+                np.savez_compressed(folder / f"{key}_prob.npz", *probs)
         for key in keys:
-            with np.load(folder / f"{key}.npz") as saved:
-                result[key] = [saved[name].astype(bool) for name in sorted(saved.files)]
+            if (folder / f"{key}_prob.npz").exists():
+                with np.load(folder / f"{key}_prob.npz") as saved:
+                    result[key] = [saved[name].astype(np.float32) > MASK_PROB for name in sorted(saved.files)]
+            else:                                              # cached before the probability maps were kept
+                with np.load(folder / f"{key}.npz") as saved:
+                    result[key] = [saved[name].astype(bool) for name in sorted(saved.files)]
         return result
+
+    def probabilities(self, image_path: Path, key: str) -> list[np.ndarray] | None:
+        """The cached probability maps behind get(image_path, (key,)), None for a cache from before they were kept."""
+        self.get(image_path, (key,))
+        path = self.cache / hashlib.sha256(image_path.read_bytes()).hexdigest()[:20] / f"{key}_prob.npz"
+        if not path.exists():
+            return None
+        with np.load(path) as saved:
+            return [saved[name].astype(np.float32) for name in sorted(saved.files)]
 
 
 def _fit_line(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -287,20 +307,26 @@ def side_edges(mask: np.ndarray, gray: np.ndarray, contact: list[list[int]], rim
         rows_in = np.array(rows)[inliers]
         inside = np.array([gray[y, min(max(int(round(offset + slope * y)) + sign * 3, 0), gray.shape[1] - 1)]
                            for y in rows_in])
-        pair = parallel_inside(gray, mask, slope, offset, rows_in, sign)
+        angle = float(np.degrees(np.arctan2(1, -slope)))     # of the edge going back: 90 straight up, >90 leaning left
+        # a side face is in view only from its own side of the slab, and from there the side edges lean the other
+        # way going back (the length's vanishing point lies beyond that face): the left face shows when the left
+        # edge leans left, the right face when the right edge leans right. A dark strip inside an edge that leans
+        # the wrong way is the sheet's own dark rim or shadow, not a side face (run 46da745, attempt 1: 6 px of
+        # sheet would have been trimmed off its right side as "shadow").
+        can_show = angle > 90 if side == "left" else angle < 90
+        pair = parallel_inside(gray, mask, slope, offset, rows_in, sign) if can_show else None
         if pair is not None:                                                 # a side face: dark between the two lines
             between = np.array([gray[y, min(max(int(round((offset + slope * y + pair[1] + pair[0] * y) / 2)), 0),
                                             gray.shape[1] - 1)] for y in rows_in])
             if float(np.median(between)) >= dark + .5 * (light - dark):
                 pair = None
-        kind = "bottom" if pair is not None or float(np.median(inside)) < dark + .35 * (light - dark) else "top"
+        kind = "bottom" if pair is not None or (can_show and float(np.median(inside)) < dark + .35 * (light - dark)) else "top"
         # SAM3 rounds the corner: where the outline leaves the line before the front, the corner is straight
         # below the last point on it (the slab's vertical front edge), not further along the line
         y_last = float(rows_in.max())
         x_last = offset + slope * y_last
         short = line_y(rim, x_last) - y_last > 4
         x = x_last if short else crossing(slope, offset, contact if kind == "bottom" else rim)
-        angle = float(np.degrees(np.arctan2(1, -slope)))     # of the edge going back: 90 straight up, >90 leaning left
         result[side] = {"kind": kind, "angle_deg": round(angle, 1), "rows": int(inliers.sum()),
                         "crossing_px": round(float(x), 1), "pair": pair is not None}
         corners = result["corners_px"]
@@ -325,10 +351,9 @@ def below_line(mask: np.ndarray, line: list[list[int]], toward) -> np.ndarray:
     return mask & (((yy - y0) * (x1 - x0) - (xx - x0) * (y1 - y0)) * sign > 0)
 
 
-def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int], gray: np.ndarray,
-                lift) -> tuple[list[list[int]], dict]:
-    """Find the central loaded LSP by cargo overlap and the top front edge of that slab: the edge a second sheet
-    shares with it.
+def slab_edges(mask: np.ndarray, gray: np.ndarray, lift, contact: list[list[int]] | None = None,
+               ) -> tuple[list[list[int]], dict]:
+    """The top front edge of one sheet's slab, from its mask, and how it was found.
 
     The edge is the lower outline of the mask between the front corners (floor_contact_edge) moved up by the height
     of the black front side face measured on the photo (side_face_height). The lower outline alone is not enough:
@@ -343,6 +368,79 @@ def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int],
     lift(pixel) is the image position of the point one sheet thickness above the floor point seen at a pixel
     (calibrated camera): it bounds the search, and it is the whole estimate only when the photo shows no rim (a
     dark load on a dark sheet), which is less accurate."""
+    if contact is None:
+        contact = floor_contact_edge(mask)
+        if contact is None:
+            raise RuntimeError("the sheet's mask has no straight lower outline to find its front edge from")
+    lifted = [[int(v) for v in lift(point)] for point in contact]
+    thickness = float(np.mean([c[1] - e[1] for c, e in zip(contact, lifted)]))
+    info = {"floor_contact_px": contact, "thickness_px": round(thickness, 1)}
+    halves = side_face_height(mask, gray, contact, thickness)
+    if halves is None:
+        return lifted, {"method": "floor_contact_lifted_by_thickness", "edge_observed": False, **info}
+    left, right = halves
+    if left and right and abs(left[1] - right[1]) > EVEN_PX:
+        reference = "top_rim"                               # height as a line through the two measured ends
+        slope = (right[1] - left[1]) / (right[0] - left[0])
+        heights = [left[1] + slope * (x - left[0]) for x, _ in contact]
+    else:
+        reference = "floor_line" if left and right else "floor_line_one_end"
+        measured = [half for half in halves if half]
+        heights = [sum(h * n for _, h, n in measured) / sum(n for _, _, n in measured)] * 2
+    edge = [[x, int(round(y - h))] for (x, _), (_, y), h in zip(lifted, contact, heights)]
+    # the side edges sharpen the front corners: the mask's extent is rounded by a few pixels
+    sides = side_edges(mask, gray, contact, edge)
+    for i, side in enumerate(("left", "right")):
+        x = sides["corners_px"]["rim"][side] + (lifted[i][0] - contact[i][0])
+        edge[i] = [int(x), int(round(line_y(edge, x)))]
+    return edge, {"method": "side_face_top", "edge_observed": True, "reference": reference,
+                  "side_face_px": [round(h, 1) for h in heights],
+                  "rim_columns": [half[2] if half else 0 for half in halves],
+                  "side_edges": {k: v for k, v in sides.items() if k != "corners_px"},
+                  "front_corners_px": sides["corners_px"], **info}
+
+
+def trim_to_slab(mask: np.ndarray, rim: list[list[int]], thickness_px: float,
+                 sides: dict | None = None) -> tuple[np.ndarray, int]:
+    """The mask without the shadow beside the slab. SAM3 includes the shadow in a sheet's mask: under a sheet a
+    forklift holds up, in front of and beside one lying on the floor. The slab ends at its contact line, the rim
+    lowered by the camera's figure for the thickness, so what the mask has below that line is shadow, not sheet
+    (the mask's own lower outline is the shadow's rim). Where a side's top edge was found (side_edges, "pair"),
+    the side face's bottom edge is that line lowered by the same thickness, and what lies outside it is shadow
+    too. Returns (trimmed mask, pixels removed)."""
+    yy, xx = np.mgrid[0:mask.shape[0], 0:mask.shape[1]]
+    keep = yy <= line_y(rim, xx) + thickness_px + 1
+    for side, sign in (("left", 1), ("right", -1)):
+        found = (sides or {}).get(side)
+        if not found or not found.get("pair"):
+            continue
+        angle = np.radians(found["angle_deg"])
+        if abs(np.sin(angle)) < 1e-3:
+            continue
+        x_top = found["top_edge_crossing_px"]
+        y_bottom = line_y(rim, x_top) + thickness_px
+        x_at = x_top + (y_bottom - yy) * np.cos(angle) / np.sin(angle)   # the bottom edge, row by row
+        keep &= (xx - x_at) * sign >= -1
+    trimmed = mask & keep
+    return trimmed, int(mask.sum() - trimmed.sum())
+
+
+def sheet_footprint(mask: np.ndarray, gray: np.ndarray, lift) -> tuple[np.ndarray, dict]:
+    """A sheet's mask trimmed of its shadow (slab_edges, then trim_to_slab). A mask without a straight lower
+    outline is returned as it is."""
+    try:
+        rim, info = slab_edges(mask, gray, lift)
+    except RuntimeError:
+        return mask, {"method": "untrimmed", "shadow_px_removed": 0}
+    trimmed, removed = trim_to_slab(mask, rim, info["thickness_px"], info.get("side_edges"))
+    return trimmed, {"method": info["method"], "rim_px": rim, "thickness_px": info["thickness_px"],
+                     "shadow_px_removed": removed}
+
+
+def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int], gray: np.ndarray,
+                lift) -> tuple[list[list[int]], dict]:
+    """Find the central loaded LSP by cargo overlap and the top front edge of that slab (slab_edges): the edge a
+    second sheet shares with it."""
     width, height = image_size
     cargo = []
     for mask in masks.get("cargo", []):
@@ -381,32 +479,8 @@ def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int],
         raise RuntimeError("SAM3 did not isolate a loaded source LSP with its front bottom edge on the floor; "
                            "supply --contact-edge")
     _, mask, box, contact = max(candidates, key=lambda item: item[0])
-    lifted = [[int(v) for v in lift(point)] for point in contact]
-    thickness = float(np.mean([c[1] - e[1] for c, e in zip(contact, lifted)]))
-    info = {"floor_contact_px": contact, "thickness_px": round(thickness, 1), "cargo_bbox": cargo_box, "lsp_bbox": box}
-    halves = side_face_height(mask, gray, contact, thickness)
-    if halves is None:
-        return lifted, {"method": "floor_contact_lifted_by_thickness", "edge_observed": False, **info}
-    left, right = halves
-    if left and right and abs(left[1] - right[1]) > EVEN_PX:
-        reference = "top_rim"                               # height as a line through the two measured ends
-        slope = (right[1] - left[1]) / (right[0] - left[0])
-        heights = [left[1] + slope * (x - left[0]) for x, _ in contact]
-    else:
-        reference = "floor_line" if left and right else "floor_line_one_end"
-        measured = [half for half in halves if half]
-        heights = [sum(h * n for _, h, n in measured) / sum(n for _, _, n in measured)] * 2
-    edge = [[x, int(round(y - h))] for (x, _), (_, y), h in zip(lifted, contact, heights)]
-    # the side edges sharpen the front corners: the mask's extent is rounded by a few pixels
-    sides = side_edges(mask, gray, contact, edge)
-    for i, side in enumerate(("left", "right")):
-        x = sides["corners_px"]["rim"][side] + (lifted[i][0] - contact[i][0])
-        edge[i] = [int(x), int(round(line_y(edge, x)))]
-    return edge, {"method": "side_face_top", "edge_observed": True, "reference": reference,
-                  "side_face_px": [round(h, 1) for h in heights],
-                  "rim_columns": [half[2] if half else 0 for half in halves],
-                  "side_edges": {k: v for k, v in sides.items() if k != "corners_px"},
-                  "front_corners_px": sides["corners_px"], **info}
+    edge, info = slab_edges(mask, gray, lift, contact)
+    return edge, {**info, "cargo_bbox": cargo_box, "lsp_bbox": box}
 
 
 class MogePoints:
@@ -766,21 +840,29 @@ def outline(mask: np.ndarray) -> list[list[int]]:
 
 def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[str, list[np.ndarray]],
                           region: Image.Image, points: np.ndarray, valid: np.ndarray, floor: np.ndarray,
-                          edge_px: list[list[int]], toward_px, depth_to_width: float) -> dict:
+                          edge_px: list[list[int]], toward_px, depth_to_width: float, gray: np.ndarray | None = None,
+                          lift=None) -> dict:
     """One new LSP inside the edit region (added_sheet), no cargo yet, and the new sheet's orientation, size and
-    position equal to the original's on the floor plane (compare_sheets)."""
+    position equal to the original's on the floor plane (compare_sheets). With the candidate's grey image and the
+    camera's lift, both sheets are measured without their shadows (sheet_footprint, trim_to_slab)."""
     shape = valid.shape
     inside = np.asarray(region) > 0
     count, sheet = added_sheet(source, candidate, region, edge_px, toward_px)
+    result = {"new_lsp_instances": count}
+    if sheet is not None and gray is not None and lift is not None:
+        sheet, footprint = sheet_footprint(sheet, gray, lift)
+        result["new_sheet"] = footprint
     failures = []
     if count != 1:
         failures.append(f"SAM3 found {count} new LSP instances; expected one")
     new_cargo = union(candidate.get("cargo", []), shape) & ~union(source.get("cargo", []), shape)
     if (new_cargo & inside).sum() > 1000:
         failures.append("Cargo appeared before the cargo stage")
-    result = {"new_lsp_instances": count}
     if sheet is not None:
         old = sheet_at_edge(source.get("LSP", []), edge_px)
+        if old is not None and lift is not None:
+            thickness = float(np.mean([y - lift((x, y))[1] for x, y in edge_px]))
+            old, result["old_sheet_shadow_px_removed"] = trim_to_slab(old, edge_px, thickness)
         result.update(compare_sheets(points, valid, floor, old, edge_px, toward_px, sheet, depth_to_width))
         failures = result["failures"] + failures
     result.update({"passed": not failures, "failures": failures})

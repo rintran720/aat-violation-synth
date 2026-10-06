@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from synth.vision_geometry import (added_sheet, below_line, edit_region, floor_contact_edge, guide_marks, outline,
+                                   sheet_footprint, trim_to_slab,
                                    polygon_mask, preserve_outside, raw_drift, side_edges, source_edge,
                                    verify_cargo_masks, verify_sheet_geometry)
 
@@ -77,15 +78,40 @@ def raycast(boxes):
     return rays * best[..., None], np.isfinite(best), label
 
 
-def oblique(new_box):
-    """verify_sheet_geometry on the scene with a new sheet box in front of the loaded one."""
+def oblique(new_box, shadow_m=0., trim=False):
+    """verify_sheet_geometry on the scene with a new sheet box in front of the loaded one. shadow_m: a strip of floor
+    in front of the new sheet, this deep, that SAM3 put into the sheet's mask (the shadow); trim: measure with
+    the grey image and the camera's lift, which removes it."""
     _, _, before = raycast([OLD_BOX, CARGO_BOX])
     points, valid, after = raycast([OLD_BOX, CARGO_BOX, new_box])
+    (x0, y0, _), (x1, _, _) = new_box
+    _, _, with_shadow = raycast([OLD_BOX, CARGO_BOX, ((x0, y0 - shadow_m, 0.), (x1, y0, .001))])
+    new = (after == 2) | (with_shadow == 2)
     source = {"LSP": [before == 0], "cargo": [before == 1]}
-    candidate = {"LSP": [after == 0, after == 2], "cargo": [after == 1]}
+    candidate = {"LSP": [after == 0, new], "cargo": [after == 1]}
     edge = [project((-1.15, 10, .09)), project((1.15, 10, .09))]
+    gray, lift = None, None
+    if trim:
+        # the photo: a light floor, the sheets' top faces lighter still, black side faces and shadow
+        gray = np.full(VIEW[::-1], 120, np.uint8)
+        gray[(after == 0) | (after == 2)] = 200
+        gray[after == 1] = 230
+        front = np.zeros(VIEW[::-1], bool)
+        for top in ((-1.15, 10., .09), (x0, y0, .09)):               # the slabs' front side faces, 9 cm high
+            (fx0, fy0), (fx1, _) = project(top), project((1.15 if top[0] < 0 else x1, top[1], .09))
+            (_, fy1) = project((top[0], top[1], 0.))
+            front[fy0:fy1 + 1, fx0:fx1 + 1] = True
+        gray[front | (with_shadow == 2)] = 15
+        lift = lambda p: project(np.array(unproject(p)) + [0, 0, .09])
     return verify_sheet_geometry(source, candidate, Image.new("L", VIEW, 255), points, valid,
-                                 (before == -1) & (after == -1) & valid, edge, project((0, 9, 0)), 1.85 / 2.3)
+                                 (before == -1) & (after == -1) & valid, edge, project((0, 9, 0)), 1.85 / 2.3,
+                                 gray, lift)
+
+
+def unproject(pixel):
+    """The floor point seen at a pixel (the inverse of project at z = 0)."""
+    ray = np.array([(pixel[0] - VIEW[0] / 2) / FOCAL, (pixel[1] - VIEW[1] / 2) / FOCAL, 1.]) @ np.array([RIGHT, DOWN, FORWARD])
+    return EYE + ray * (-EYE[2] / ray[2])
 
 
 class ObliqueViewTests(unittest.TestCase):
@@ -110,6 +136,19 @@ class ObliqueViewTests(unittest.TestCase):
         self.assertAlmostEqual(shifted["width_ratio"], 1, delta=.05)
         for measured in (gap, short, shifted):
             self.assertFalse(measured["passed"])
+
+    def test_shadow_in_the_new_sheets_mask_inflates_its_depth_until_the_slab_trim_removes_it(self):
+        box = ((-1.15, 8.15, 0), (1.15, 10., .09))
+        # the rim is searched up to 1.8 sheet thicknesses above the mask's lower outline (side_face_height), so
+        # the shadow must stay shallower than 0.8 of the side face's height in the image: 0.15 m here
+        untrimmed = oblique(box, shadow_m=.15)
+        self.assertGreater(untrimmed["depth_ratio"], 1.06)                   # 0.15 m of shadow on 1.85 m
+        trimmed = oblique(box, shadow_m=.15, trim=True)
+        self.assertEqual(trimmed["new_sheet"]["method"], "side_face_top")
+        self.assertGreater(trimmed["new_sheet"]["shadow_px_removed"], 1000)
+        self.assertAlmostEqual(trimmed["depth_ratio"], 1, delta=.05)
+        self.assertLess(abs(trimmed["gap_m"]), .05)
+        self.assertTrue(trimmed["passed"], trimmed)
 
     def test_depth_may_differ_by_a_fifth_width_by_a_tenth(self):
         # depth along the view is the least certain measure (camera and MoGe differ by ~20% on s_003)
@@ -333,17 +372,20 @@ class VisionGeometryTests(unittest.TestCase):
         self.assertLess(abs(y1 - 110), 2.5)
 
     def slab_with_sides(self):
-        """A loaded slab seen a little from the left: the top face is a parallelogram whose left side edge runs from
-        the rear-left corner (90, 40) to the front-left corner (60, 100) and whose right side edge from (270, 40)
-        to (240, 110); the black front side face is 7 px high and the left side face shows as a dark strip along the
-        left edge. The load covers the middle of the top face. The mask's corners are rounded like SAM3's."""
+        """A loaded slab seen from the left, so its side edges lean left going back: the top face is a parallelogram
+        whose left side edge runs from the rear-left corner (30, 40) to the front-left corner (60, 100) and whose
+        right side edge from (210, 40) to (240, 110). The slab is 9 px thick: the black front side face is 9 px
+        high, and the left side face shows as a dark strip 9 px below the left top edge (its bottom edge is the top
+        edge lowered by the thickness, the slab's vertical edges being vertical in the image). The load covers the
+        middle of the top face. The mask's corners are rounded like SAM3's."""
         yy, xx = np.mgrid[0:200, 0:300]
         top = 100 + (xx - 60) * 10 / 180
-        left_x = 90 - (yy - 40) * 30 / 60                                 # left top edge, x as a function of y
-        right_x = 270 - (yy - 40) * 30 / 70
+        left_x = 30 + (yy - 40) * 30 / 60                                 # left top edge, x as a function of y
+        right_x = 210 + (yy - 40) * 30 / 70
+        left_top_y = 40 + (xx - 30) * 60 / 30                             # the same edge, y as a function of x
         face = (yy >= 40) & (yy < top) & (xx >= left_x) & (xx <= right_x)
-        black = (yy >= top) & (yy < top + 7) & (xx >= left_x - 6) & (xx <= 240)   # the side strip reaches the floor
-        left_side = (yy >= 40) & (yy < top) & (xx >= left_x - 6) & (xx < left_x)      # dark side face strip
+        black = (yy >= top) & (yy < top + 9) & (xx >= 60) & (xx <= 240)   # the front side face reaches the floor
+        left_side = (xx >= 30) & (xx < 60) & (yy >= left_top_y) & (yy < left_top_y + 9)   # dark side face strip
         cargo = (xx >= 110) & (xx <= 200) & (yy >= 10) & (yy < top - 2)
         gray = np.full((200, 300), 120, np.uint8)
         gray[face] = 90
@@ -356,23 +398,23 @@ class VisionGeometryTests(unittest.TestCase):
 
     def test_side_edges_find_the_four_side_lines_and_sharpen_the_front_corners(self):
         mask, gray, _ = self.slab_with_sides()
-        contact = [[55, 107], [236, 116]]                                   # from the rounded mask: 3-4 px short
-        rim = [[55, 100], [236, 110]]
+        contact = [[63, 109], [236, 119]]                                   # from the rounded mask: 3-4 px short
+        rim = [[63, 100], [236, 110]]
         sides = side_edges(mask, gray, contact, rim)
         self.assertEqual(sides["left"]["kind"], "bottom")                   # the dark left side face shows...
         self.assertTrue(sides["left"]["pair"])                              # ...with the top edge parallel to it
         self.assertEqual(sides["right"]["kind"], "top")                     # the right side is hidden
         self.assertFalse(sides["right"]["pair"])
-        self.assertLess(abs(sides["left"]["angle_deg"] - 63), 6)            # atan(60 / 30)
-        self.assertLess(abs(sides["right"]["angle_deg"] - 67), 6)           # both lean right going back
-        self.assertLess(abs(sides["corners_px"]["contact"]["left"] - 51), 3)   # left bottom edge meets the floor line
-        self.assertLess(abs(sides["corners_px"]["rim"]["left"] - 60), 3)       # left top edge meets the rim: the
-        self.assertLess(abs(sides["corners_px"]["rim"]["right"] - 240), 3)     # rim stops short of the side face
+        self.assertLess(abs(sides["left"]["angle_deg"] - 117), 6)           # 180 - atan(60 / 30)
+        self.assertLess(abs(sides["right"]["angle_deg"] - 113), 6)          # both lean left going back
+        self.assertLess(abs(sides["corners_px"]["contact"]["left"] - 60), 3)   # left bottom edge meets the floor line
+        self.assertLess(abs(sides["corners_px"]["rim"]["left"] - 60), 3)       # left top edge meets the rim
+        self.assertLess(abs(sides["corners_px"]["rim"]["right"] - 240), 3)
 
     def test_source_edge_uses_the_side_lines_for_the_corners(self):
         mask, gray, cargo = self.slab_with_sides()
         masks = {"LSP": [mask], "cargo": [cargo], "floor": [~(mask | cargo)]}
-        edge, info = source_edge(masks, (300, 200), gray, lambda p: (p[0], p[1] - 7))
+        edge, info = source_edge(masks, (300, 200), gray, lambda p: (p[0], p[1] - 9))
         self.assertIn("side_edges", info)
         self.assertLess(abs(edge[0][0] - 60), 3)                            # not out over the left side face
         self.assertLess(abs(edge[1][0] - 240), 3)
@@ -381,11 +423,37 @@ class VisionGeometryTests(unittest.TestCase):
     def test_below_line_is_the_front_band_under_the_rim(self):
         mask, gray, _ = self.slab_with_sides()
         band = below_line(mask, [[60, 100], [240, 110]], toward=[150, 150])
-        self.assertTrue(band[108, 150])                                     # the black front face (rim at 105)
+        self.assertTrue(band[110, 150])                                     # the black front face (rim at 105)
         self.assertFalse(band[90, 150])                                     # the top face stays
         yy, xx = np.mgrid[0:200, 0:300]
         expected = mask & (yy > 100 + (xx - 60) * 10 / 180)
         self.assertLess(int((band ^ expected).sum()), 200)
+
+    def test_trim_to_slab_drops_the_shadow_under_a_raised_sheet_and_keeps_the_side_face(self):
+        masks, gray = self.carried_sheet(shadow=(5, 5))
+        mask = masks["LSP"][0]
+        trimmed, removed = trim_to_slab(mask, [[60, 100], [240, 110]], 7)
+        self.assertTrue(trimmed[98, 70])                                     # top face (rim at 100.6 here)...
+        self.assertTrue(trimmed[106, 70])                                    # ...and the 7 px side face stay
+        self.assertFalse(trimmed[111, 70])                                   # the shadow below it goes
+        self.assertAlmostEqual(removed, 5 * 180, delta=200)
+        self.assertEqual(int((trimmed & ~mask).sum()), 0)
+
+    def test_sheet_footprint_trims_by_the_measured_rim_and_the_side_lines(self):
+        mask, gray, _ = self.slab_with_sides()
+        yy, xx = np.mgrid[0:200, 0:300]
+        top = 100 + (xx - 60) * 10 / 180
+        shadow = (yy >= top + 9) & (yy < top + 15) & (xx >= 55) & (xx <= 240)      # 6 px of shadow under the front
+        # (the rim is searched up to 1.8 thicknesses above the lower outline: 16 px for the 9 px side face)
+        left_top_y = 40 + (xx - 30) * 60 / 30
+        beside = (xx >= 30) & (xx < 60) & (yy >= left_top_y + 9) & (yy < left_top_y + 17)   # under the left face
+        gray = gray.copy()
+        gray[shadow | beside] = 30
+        trimmed, info = sheet_footprint(mask | shadow | beside, gray, lambda p: (p[0], p[1] - 9))
+        self.assertEqual(info["method"], "side_face_top")
+        self.assertLess(int((trimmed & shadow).sum()), .4 * shadow.sum())   # a 1-2 px margin of 6 stays
+        self.assertLess(int((trimmed & beside).sum()), .25 * beside.sum())  # outside the left side face's bottom edge
+        self.assertGreater(int((trimmed & mask).sum()), .97 * mask.sum())  # the slab itself stays
 
     def test_source_edge_falls_back_to_the_lifted_floor_contact_without_a_visible_step(self):
         masks, gray = self.carried_sheet(above_is_dark=True)         # dark load on a dark sheet: no edge to see

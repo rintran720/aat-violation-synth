@@ -49,6 +49,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from synth.vision_geometry import (MogePoints, Sam3Masks, added_sheet, below_line, edit_region, guide_marks, outline,
+                                   sheet_footprint,
                                    preserve_outside, raw_drift, sheet_at_edge, source_edge, union, verify_cargo_masks,
                                    verify_sheet_geometry, verify_unchanged, zoom_pair)
 
@@ -537,6 +538,8 @@ def main() -> int:
             gray = np.asarray(image.convert("L"))
         thickness = float(json.loads((ROOT / "config.json").read_text())["lsp_thickness_m"])
         if args.contact_edge:
+            camera = Camera(camera_path)
+            lift = lambda pixel: camera.lift(pixel, thickness)      # one sheet thickness above a floor pixel
             values = [int(value.strip()) for value in args.contact_edge.split(",")]
             if (len(values) != 4 or values[0] >= values[2]
                     or any(not 0 <= value < size[index % 2] for index, value in enumerate(values))):
@@ -544,8 +547,7 @@ def main() -> int:
             edge = [[values[0], values[1]], [values[2], values[3]]]
             anchor_info = {"method": "manual_override", "edge_observed": False}
         else:
-            camera = Camera(camera_path)
-            edge, anchor_info = source_edge(source_masks, size, gray, lambda pixel: camera.lift(pixel, thickness))
+            edge, anchor_info = source_edge(source_masks, size, gray, lift)
         report["anchor"] = {"contact_edge_px": edge, **anchor_info}
         save_report()
         guide = make_geometry_guide(source, edge, work, camera_path=camera_path, calibration_path=calibration_path)
@@ -610,8 +612,9 @@ def main() -> int:
                 preserve_outside(source, raw, candidate, sheet_region, protected)
             candidate_masks = segmenter.get(candidate, ("LSP", "cargo"))
             points, valid = moge.get(candidate)
+            candidate_gray = np.asarray(Image.open(candidate).convert("L"))
             measured = verify_sheet_geometry(source_masks, candidate_masks, sheet_region, points, valid, floor, edge,
-                                             toward, calibrated_depth / measured_width)
+                                             toward, calibrated_depth / measured_width, candidate_gray, lift)
             if args.aesthetic_review:
                 count_call(report, "visual review - LSP realism (Astra)")
             result = gate("sheet", source, raw, candidate, sheet_region, protected, measured, source, polygon,
@@ -640,6 +643,7 @@ def main() -> int:
         if sheet is None:
             report["stopped_at"] = "no_new_sheet_to_measure"
             return 2
+        sheet = sheet_footprint(sheet, np.asarray(Image.open(accepted_sheet).convert("L")), lift)[0]   # no shadow
         sheet_outline = outline(sheet)
         report["accepted_sheet_outline_px"] = sheet_outline
         save_report()
