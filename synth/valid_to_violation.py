@@ -2,10 +2,12 @@
 
 Run: python -m synth.valid_to_violation <valid frame> [--reference-map work/catalogue3d/reference_maps/<stem>/reference_map.json]
      [--contact-edge x1,y1,x2,y2] [--camera work/camera.json] [--calibration work/calibration.json]
-     [--aesthetic-review]
+     [--aesthetic-review] [--measure-only]
 
 Two edits on the real frame, each gated by code. For now geometry alone decides: the scored realism review by Astra
-runs only with --aesthetic-review, and then it gates too.
+runs only with --aesthetic-review, and then it gates too. --measure-only makes one attempt per stage and never
+retries: the measurements go into the report, the cargo stage runs on the sheet even when its gate failed, and
+nothing is published unless both gates passed.
 1. one EMPTY LSP: the top front edge of the loaded sheet (the upper rim of its black front side face, measured
    on the photo; or given) is the whole guide: the image model adds an identical sheet along it and infers its depth from the scene. (The equal
    sheet projected with the camera calibration only bounds the edit region and places the cargo: its depth was not
@@ -333,6 +335,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calibration", type=Path, default=CALIBRATION, help="calibration.json with lsp_measured_size_m")
     parser.add_argument("--aesthetic-review", action="store_true",
                         help="also gate on Astra's realism scores (skipped for now: geometry first)")
+    parser.add_argument("--measure-only", action="store_true",
+                        help="one attempt per stage, no retries: measure, record the comparison, continue")
     parser.add_argument("--step-a-index", type=Path, default=INDEX)
     parser.add_argument("--reference-map", type=Path, help="Four selected reference images; overrides Step A index")
     parser.add_argument("--image-cli", type=Path, default=Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "skills/.system/imagegen/scripts/image_gen.py")
@@ -445,6 +449,9 @@ def summary_sheet(report: dict, path: Path, panel_height: int = 540) -> Path:
               (20, 130, 60) if accepted else (190, 30, 30), True)]
     if report.get("error"):
         lines.append((f"Error: {report['error']}"[:160], (190, 30, 30), False))
+    if report.get("measure_only"):
+        lines.append(("Mode: measure only - one attempt per stage, no retries, nothing published unless both pass",
+                      (90, 90, 90), False))
     lines.append((f"Model calls: {sum(calls.values())} in total", (20, 20, 20), True))
     lines += [(f"  {purpose}: {n}", (20, 20, 20), False) for purpose, n in calls.items()]
     for stage, name in (("sheet", "Stage 1 - empty LSP"), ("cargo", "Stage 2 - cargo")):
@@ -514,7 +521,7 @@ def main() -> int:
               "step_a_index": str(args.step_a_index.resolve()),
               "reference_map": str(args.reference_map.resolve()) if getattr(args, "reference_map", None) else None,
               "references": {key: str(value) for key, value in refs.items()},
-              "editor": args.editor, "aesthetic_review": args.aesthetic_review,
+              "editor": args.editor, "aesthetic_review": args.aesthetic_review, "measure_only": args.measure_only,
               "stages": {"sheet": [], "cargo": []}, "accepted": False,
               "calls": {}, "started_at": time.time()}
     editor_name = "Astra + imagegen" if args.editor == "codex" else f"API {args.model}"
@@ -573,7 +580,8 @@ def main() -> int:
         moge = MogePoints(ROOT / "work/vision_cache/moge")
         accepted_sheet = sheet_masks = rejected = None
         feedback = ""
-        for attempt in ([0] if getattr(args, "reuse_sheet", None) else range(1, args.max_attempts + 1)):
+        attempts = [1] if args.measure_only else range(1, args.max_attempts + 1)
+        for attempt in ([0] if getattr(args, "reuse_sheet", None) else attempts):
             raw = None
             if attempt == 0:
                 candidate = args.reuse_sheet.resolve()
@@ -620,12 +628,18 @@ def main() -> int:
                         "one on the floor plane (SAM3 masks, MoGe depth) and rejected it: "
                         + "; ".join(result["failures"]) + ". Edit Image 1 again and correct exactly these "
                         "deviations; keep what Image 4 already has right.")
-        if accepted_sheet is None:
+        sheet_accepted = accepted_sheet is not None
+        if not sheet_accepted:
             report["stopped_at"] = "sheet_geometry_or_realism"
-            return 2
+            if not args.measure_only:
+                return 2
+            accepted_sheet, sheet_masks = candidate, candidate_masks     # measure the cargo stage on it anyway
         report["accepted_sheet"] = str(accepted_sheet)
         # the sheet as the image model drew it; the projected polygon only suggested where
         sheet = added_sheet(source_masks, sheet_masks, sheet_region, edge, toward)[1]
+        if sheet is None:
+            report["stopped_at"] = "no_new_sheet_to_measure"
+            return 2
         sheet_outline = outline(sheet)
         report["accepted_sheet_outline_px"] = sheet_outline
         save_report()
@@ -649,7 +663,7 @@ def main() -> int:
         original_cargo_protected = protected[1].copy(); original_cargo_protected[occlusion] = False
         cargo_protected = [protected[0], original_lsp_protected, original_cargo_protected]
         cargo_region = edit_region(size, sheet_outline, "cargo")
-        for attempt in ([0] if getattr(args, "reuse_cargo", None) else range(1, args.max_attempts + 1)):
+        for attempt in ([0] if getattr(args, "reuse_cargo", None) else attempts):
             raw = None
             if attempt == 0:
                 candidate = args.reuse_cargo.resolve()
@@ -685,13 +699,14 @@ def main() -> int:
             save_report()
             print(f"Cargo {'reuse' if attempt == 0 else f'{attempt}/{args.max_attempts}'}: "
                   f"{'PASS' if result['accepted'] else 'FAIL'} — " + "; ".join(result["failures"]), flush=True)
-            if result["accepted"]:
+            if result["accepted"] and sheet_accepted:
                 publish(candidate, source, output)
                 report.update({"accepted": True, "output": str(output), "output_sha256": sha256(output)})
                 print(f"Accepted image: {output}\nReview report: {report_path}")
                 return 0
             feedback = "Fix these failures: " + "; ".join(result["failures"])
-        report["stopped_at"] = "cargo_support_or_realism"
+        if sheet_accepted:
+            report["stopped_at"] = "cargo_support_or_realism"
         return 2
     except Exception as error:
         report["error"] = str(error)

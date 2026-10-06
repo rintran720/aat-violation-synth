@@ -22,7 +22,8 @@ def args_for(root: Path, source: Path, output: Path, **extra) -> argparse.Namesp
     values = dict(input=source, output=output, max_attempts=1, editor="codex", model="unused",
                   step_a_index=root / "index.json", image_cli=root / "unused.py", codex_bin="codex",
                   contact_edge="20,50,80,50", reference_map=None, reuse_sheet=None, reuse_cargo=None,
-                  camera=root / "camera.json", calibration=root / "calibration.json", aesthetic_review=True)
+                  camera=root / "camera.json", calibration=root / "calibration.json", aesthetic_review=True,
+                  measure_only=False)
     values.update(extra)
     return argparse.Namespace(**values)
 
@@ -88,7 +89,7 @@ class ValidToViolationTests(unittest.TestCase):
             self.assertFalse((root / "out.png").exists())
 
     def run_pipeline(self, root: Path, aesthetic: dict | None, drift_passes: bool = True, sheet_geometry=None,
-                     max_attempts: int = 1):
+                     max_attempts: int = 1, measure_only: bool = False):
         """aesthetic None: run without the realism review (the default of the command line)."""
         source = root / "valid.png"
         Image.new("RGB", (120, 110), "gray").save(source)
@@ -103,7 +104,8 @@ class ValidToViolationTests(unittest.TestCase):
             Image.new("RGB", (20, 20), "white").save(ref)
             refs[category] = ref
         output = root / "final.png"
-        args = args_for(root, source, output, max_attempts=max_attempts, aesthetic_review=aesthetic is not None)
+        args = args_for(root, source, output, max_attempts=max_attempts, aesthetic_review=aesthetic is not None,
+                        measure_only=measure_only)
         review = (mock.patch.object(pipeline, "astra", return_value=aesthetic) if aesthetic is not None else
                   mock.patch.object(pipeline, "astra", side_effect=AssertionError("realism review is switched off")))
         calls = []
@@ -201,6 +203,22 @@ class ValidToViolationTests(unittest.TestCase):
             self.assertTrue(62 < box[3] <= 105 and 34 < (box[0] + box[2]) / 2 < 95)   # cargo stands on it
             self.assertIn(str(report["accepted_sheet_outline_px"]), calls[1][2])
             self.assertNotIn(str(report["target_polygon_px"]), calls[1][2])
+
+    def test_measure_only_runs_each_stage_once_records_the_numbers_and_publishes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            wrong = {"passed": False, "failures": ["the new LSP is rotated +12.0 deg relative to the original"],
+                     "angle_deg": 12.0, "width_ratio": 1.0, "depth_ratio": 1.0, "gap_m": 0.0, "lateral_m": 0.0}
+            code, output, calls, report = self.run_pipeline(Path(folder), None, sheet_geometry=[wrong] * 3,
+                                                            max_attempts=3, measure_only=True)
+            self.assertEqual(code, 2)
+            self.assertFalse(output.exists())
+            self.assertEqual([name for name, *_ in calls], ["sheet_raw_01.png", "cargo_raw_01.png"])   # no retries
+            self.assertEqual(len(report["stages"]["sheet"]), 1)
+            self.assertEqual(len(report["stages"]["cargo"]), 1)                 # the cargo stage ran on the failed sheet
+            self.assertFalse(report["stages"]["sheet"][0]["accepted"])
+            self.assertTrue(report["stages"]["cargo"][0]["accepted"])
+            self.assertTrue(report["measure_only"])
+            self.assertEqual(report["stopped_at"], "sheet_geometry_or_realism")
 
     def test_geometry_alone_decides_without_the_realism_review(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
