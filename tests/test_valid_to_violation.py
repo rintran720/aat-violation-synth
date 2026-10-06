@@ -23,7 +23,7 @@ def args_for(root: Path, source: Path, output: Path, **extra) -> argparse.Namesp
                   step_a_index=root / "index.json", image_cli=root / "unused.py", codex_bin="codex",
                   contact_edge="20,50,80,50", reference_map=None, reuse_sheet=None, reuse_cargo=None,
                   camera=root / "camera.json", calibration=root / "calibration.json", aesthetic_review=True,
-                  measure_only=False, references="step-a", cargo_kind=None, cargo_skid="any", seed=0)
+                  measure_only=False, references="step-a", cargo_kind=None, cargo_skid="any", seed=0, sheet_at=None)
     values.update(extra)
     return argparse.Namespace(**values)
 

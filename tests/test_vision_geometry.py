@@ -8,7 +8,8 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from synth.vision_geometry import (added_sheet, below_line, edit_region, floor_contact_edge, guide_marks, outline,
-                                   sheet_footprint, trim_to_slab,
+                                   Rotation, push_direction, pushed_sheet, sheet_footprint, slab_edges, top_face_ends,
+                                   trim_to_slab,
                                    polygon_mask, preserve_outside, raw_drift, side_edges, source_edge,
                                    verify_cargo_masks, verify_sheet_geometry)
 
@@ -454,6 +455,67 @@ class VisionGeometryTests(unittest.TestCase):
         self.assertLess(int((trimmed & shadow).sum()), .4 * shadow.sum())   # a 1-2 px margin of 6 stays
         self.assertLess(int((trimmed & beside).sum()), .25 * beside.sum())  # outside the left side face's bottom edge
         self.assertGreater(int((trimmed & mask).sum()), .97 * mask.sum())  # the slab itself stays
+
+    def test_rotation_turns_the_push_direction_down_and_back(self) -> None:
+        for direction in ((1, 0), (-1, 0), (0, 1), (-.6, .8), (.7, -.7)):
+            turn = Rotation(direction, (200, 300))
+            cx, cy = 150, 100
+            px, py = turn.forward((cx + 10 * direction[0], cy + 10 * direction[1]))
+            ox, oy = turn.forward((cx, cy))
+            self.assertLess(abs(px - ox), .5)                                 # the push points straight down
+            self.assertAlmostEqual(py - oy, 10, delta=.5)
+            back = turn.backward(turn.forward((37, 91)))
+            self.assertAlmostEqual(back[0], 37, delta=.01)
+            self.assertAlmostEqual(back[1], 91, delta=.01)
+        self.assertTrue(Rotation((0, 1), (200, 300)).trivial)
+
+    def test_slab_edges_in_the_push_direction_finds_the_side_of_the_mask_the_push_points_to(self) -> None:
+        # the slab fixture turned a quarter turn counter-clockwise: the front (down in the fixture) is then on the
+        # right, so the forklift pushes to the right and the shared edge is the mask's right side
+        mask, gray, cargo = self.slab_with_sides()
+        mask_t, gray_t = np.rot90(mask), np.rot90(gray)                      # counter-clockwise: (x, y) -> (y, W-1-x)
+        W = mask.shape[1]
+        to_t = lambda p: (p[1], W - 1 - p[0])
+        from_t = lambda p: (W - 1 - p[1], p[0])
+        lift_t = lambda p: to_t((from_t(p)[0], from_t(p)[1] - 9))
+        edge, info = slab_edges(np.ascontiguousarray(mask_t), np.ascontiguousarray(gray_t), lift_t, direction=(1, 0))
+        self.assertEqual(info["method"], "side_face_top")
+        self.assertIn("rotation_deg", info)
+        expected = [to_t((60, 100)), to_t((240, 110))]
+        for got, want in zip(sorted(edge, key=lambda p: p[1]), sorted(expected, key=lambda p: p[1])):
+            self.assertLess(abs(got[0] - want[0]), 3, (edge, expected))
+            self.assertLess(abs(got[1] - want[1]), 3, (edge, expected))
+
+    def test_rim_ends_come_from_the_top_face_not_from_a_smaller_shadow(self) -> None:
+        # a sheet held off the floor: its shadow (the black band's lower part) is 10 px shorter at each end than
+        # the top face, so the floor contact line is short while the rim must still span the whole top face
+        yy, xx = np.mgrid[0:200, 0:300]
+        top = 100 + (xx - 60) * 10 / 180
+        face = (xx >= 60) & (xx <= 240) & (yy >= top - 30) & (yy < top)
+        side = (xx >= 60) & (xx <= 240) & (yy >= top) & (yy < top + 7)
+        shadow = (xx >= 70) & (xx <= 230) & (yy >= top + 7) & (yy < top + 12)
+        cargo = (xx >= 90) & (xx <= 200) & (yy >= 30) & (yy < top - 30)
+        gray = np.full((200, 300), 120, np.uint8)
+        gray[face], gray[side], gray[shadow], gray[cargo] = 90, 10, 12, 220
+        mask = face | side | shadow
+        edge, info = slab_edges(mask, gray, lambda p: (p[0], p[1] - 7))
+        self.assertEqual(info["method"], "side_face_top")
+        self.assertEqual(info["top_face_ends_px"], (60, 240))
+        self.assertLess(abs(edge[0][0] - 60), 3, (edge, info))                # not 70, where the shadow ends
+        self.assertLess(abs(edge[1][0] - 240), 3, (edge, info))
+        self.assertIsNone(top_face_ends(side | shadow, [[60, 100], [240, 110]], 7))   # no top face in view
+
+    def test_pushed_sheet_pairs_the_lsp_with_the_forklift_that_touches_it(self) -> None:
+        mask, gray, cargo = self.slab_with_sides()
+        yy, xx = np.mgrid[0:200, 0:300]
+        forklift = (xx >= 255) & (xx <= 295) & (yy >= 20) & (yy < 120)       # to the right, 15 px off the sheet
+        other = (xx >= 10) & (xx <= 40) & (yy >= 150) & (yy < 190)           # a sheet far from any forklift
+        masks = {"forklift": [forklift], "LSP": [other, mask], "cargo": [cargo], "floor": [~(mask | cargo | forklift | other)]}
+        lsp, body = pushed_sheet(masks, (200, 300))
+        self.assertTrue((lsp == mask).all())
+        d = push_direction(lsp, body)
+        self.assertLess(d[0], -.9)                                           # pushed to the left
+        self.assertIsNone(pushed_sheet({"forklift": [], "LSP": [mask], "cargo": []}, (200, 300)))
 
     def test_source_edge_falls_back_to_the_lifted_floor_contact_without_a_visible_step(self):
         masks, gray = self.carried_sheet(above_is_dark=True)         # dark load on a dark sheet: no edge to see

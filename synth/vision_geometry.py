@@ -259,7 +259,8 @@ def parallel_inside(gray: np.ndarray, mask: np.ndarray, slope: float, offset: fl
     return float(fit[0]), float(fit[1]), len(points) // 2
 
 
-def side_edges(mask: np.ndarray, gray: np.ndarray, contact: list[list[int]], rim: list[list[int]]) -> dict:
+def side_edges(mask: np.ndarray, gray: np.ndarray, contact: list[list[int]], rim: list[list[int]],
+               rim_ends: tuple[int, int] | None = None) -> dict:
     """The sheet's side edges, which run back from its front corners, and the front corners they give.
 
     The slab has four side edges: left top, left bottom, right top, right bottom. The mask's outline shows one per
@@ -273,9 +274,12 @@ def side_edges(mask: np.ndarray, gray: np.ndarray, contact: list[list[int]], rim
     below it. Returns {"left": {...} | None, "right": {...} | None, "corners_px": {"rim": {"left": x, "right":
     x}, "contact": {...}}}; a side without a usable line keeps the contact line's ends. angle_deg is the direction
     of the edge going back from the front, from the image's +x axis with y up: 90 is straight up, more leans
-    left."""
+    left. rim_ends: where the top face ends on the rim (top_face_ends), the rim corners to start from; under a
+    sheet held off the floor the contact line is the shadow's rim, shorter than the sheet (its ends would make the
+    edge too short), so the top face is what gives the sheet's extent."""
     (x0, y0), (x1, y1) = contact
-    result = {"corners_px": {"rim": {"left": x0, "right": x1}, "contact": {"left": x0, "right": x1}}}
+    rim_left, rim_right = rim_ends if rim_ends is not None else (x0, x1)
+    result = {"corners_px": {"rim": {"left": rim_left, "right": rim_right}, "contact": {"left": x0, "right": x1}}}
     band = below_line(mask, rim, toward=[(x0 + x1) / 2, max(y0, y1) + 5])
     dark = float(np.median(gray[band])) if band.any() else 20.
     face_pixels = mask & ~band
@@ -332,6 +336,7 @@ def side_edges(mask: np.ndarray, gray: np.ndarray, contact: list[list[int]], rim
         corners = result["corners_px"]
         if abs(x - corners["contact"][side]) <= 12:                           # a plausible corner refines the end
             corners["contact"][side] = int(round(x))
+        if abs(x - corners["rim"][side]) <= 12:
             corners["rim"][side] = int(round(x))
         if pair is not None:                                                 # the top edge bounds the rim itself
             top_x = crossing(pair[0], pair[1], rim)
@@ -351,9 +356,142 @@ def below_line(mask: np.ndarray, line: list[list[int]], toward) -> np.ndarray:
     return mask & (((yy - y0) * (x1 - x0) - (xx - x0) * (y1 - y0)) * sign > 0)
 
 
+def top_face_ends(mask: np.ndarray, rim: list[list[int]], thickness_px: float) -> tuple[int, int] | None:
+    """Where the sheet's top face ends along the rim: the x extent of the mask in the rows just above the rim
+    line (up to 1.5 thicknesses, at least 4 px), ignoring columns with a stray pixel. None when the top face does
+    not show above the front at all (a load that reaches the front edge)."""
+    yy, xx = np.mgrid[0:mask.shape[0], 0:mask.shape[1]]
+    above = line_y(rim, xx) - yy
+    face = mask & (above >= 1) & (above <= max(4., 1.5 * thickness_px))
+    columns = np.flatnonzero(face.sum(axis=0) >= 2)
+    if len(columns) < 10:
+        return None
+    return int(columns[0]), int(columns[-1])
+
+
+def push_direction(lsp: np.ndarray, forklift: np.ndarray) -> np.ndarray:
+    """Unit image vector from the forklift's centroid to the sheet's: the direction the sheet is pushed in, and
+    the direction a second sheet lies in."""
+    ys, xs = np.nonzero(lsp)
+    fy, fx = np.nonzero(forklift)
+    d = np.array([xs.mean() - fx.mean(), ys.mean() - fy.mean()], dtype=float)
+    norm = float(np.linalg.norm(d))
+    if norm < 1e-6:
+        raise RuntimeError("the forklift and the sheet have the same centroid")
+    return d / norm
+
+
+def front_direction(mask: np.ndarray, push) -> np.ndarray | None:
+    """Image direction of the sheet's front edge: the mask's convex outline reduced to four sides, the two sides
+    least parallel to the push are the front and the back (the other two run along the push), and the front is
+    the one further along it. In perspective a push across the view has its front edge leaning in the image
+    (not perpendicular to the push vector), so the turned frame follows this edge, not the push. None when the
+    outline does not reduce to four sides."""
+    import cv2
+
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 30:
+        return None
+    hull = cv2.convexHull(np.c_[xs, ys].astype(np.int32))
+    epsilon = 2.
+    points = hull.reshape(-1, 2).astype(float)
+    while len(points) > 4 and epsilon < 80:
+        points = cv2.approxPolyDP(hull, epsilon, True).reshape(-1, 2).astype(float)
+        epsilon *= 1.5
+    if len(points) != 4:
+        return None
+    d = np.asarray(push, dtype=float)
+    centre = points.mean(axis=0)
+    sides = []
+    for i in range(4):
+        a, b = points[i], points[(i + 1) % 4]
+        e = b - a
+        if np.linalg.norm(e) < 8:
+            return None
+        e /= np.linalg.norm(e)
+        sides.append((abs(float(e @ d)), float(((a + b) / 2 - centre) @ d), e))
+    across = sorted(sides, key=lambda side: side[0])[:2]          # the two least parallel to the push
+    front = max(across, key=lambda side: side[1])[2]              # the one further along it
+    return front
+
+
+class Rotation:
+    """The image turned so that a direction points straight down (or, with `front`, so that the front edge is
+    horizontal with the push pointing down). The slab measurements (floor_contact_edge,
+    side_face_height, side_edges, trim_to_slab) read the sheet's front as its lower outline, which it is when the
+    forklift pushes it towards the camera (cam01). On the other cameras the push runs across the frame: the front
+    edge is then a side of the mask, and the measurements run on the turned image (the calibrated lift is mapped
+    through the same turn, so the thickness stays the camera's)."""
+
+    def __init__(self, direction, shape: tuple[int, int], front=None):
+        import cv2
+
+        height, width = shape[:2]
+        dx, dy = float(direction[0]), float(direction[1])
+        # getRotationMatrix2D turns the picture counter-clockwise by `angle`; a vector at image angle phi (y down)
+        # comes out at phi - angle, and the push must come out pointing down (90)
+        self.angle = float(np.degrees(np.arctan2(dy, dx))) - 90.
+        if front is not None:
+            # the front edge comes out horizontal, turned the way that leaves the push pointing down
+            phi_e = float(np.degrees(np.arctan2(float(front[1]), float(front[0]))))
+            phi_d = float(np.degrees(np.arctan2(dy, dx)))
+            self.angle = min((phi_e, phi_e - 180.), key=lambda a: -np.sin(np.radians(phi_d - a)))
+        centre = (width / 2, height / 2)
+        matrix = cv2.getRotationMatrix2D(centre, self.angle, 1.)
+        cos, sin = abs(matrix[0, 0]), abs(matrix[0, 1])
+        self.shape = (int(round(height * cos + width * sin)), int(round(height * sin + width * cos)))
+        matrix[0, 2] += self.shape[1] / 2 - centre[0]
+        matrix[1, 2] += self.shape[0] / 2 - centre[1]
+        self.matrix = matrix
+        self.inverse = cv2.invertAffineTransform(matrix)
+        self.source_shape = (height, width)
+
+    @property
+    def trivial(self) -> bool:
+        return abs(self.angle) < 2.
+
+    def forward(self, point) -> tuple[float, float]:
+        x, y = float(point[0]), float(point[1])
+        return (self.matrix[0, 0] * x + self.matrix[0, 1] * y + self.matrix[0, 2],
+                self.matrix[1, 0] * x + self.matrix[1, 1] * y + self.matrix[1, 2])
+
+    def backward(self, point) -> tuple[float, float]:
+        x, y = float(point[0]), float(point[1])
+        return (self.inverse[0, 0] * x + self.inverse[0, 1] * y + self.inverse[0, 2],
+                self.inverse[1, 0] * x + self.inverse[1, 1] * y + self.inverse[1, 2])
+
+    def warp_mask(self, mask: np.ndarray) -> np.ndarray:
+        import cv2
+        return cv2.warpAffine(mask.astype(np.uint8), self.matrix, (self.shape[1], self.shape[0]),
+                              flags=cv2.INTER_NEAREST) > 0
+
+    def warp_gray(self, gray: np.ndarray) -> np.ndarray:
+        import cv2
+        return cv2.warpAffine(gray, self.matrix, (self.shape[1], self.shape[0]), flags=cv2.INTER_LINEAR)
+
+    def unwarp_mask(self, mask: np.ndarray) -> np.ndarray:
+        import cv2
+        return cv2.warpAffine(mask.astype(np.uint8), self.inverse, (self.source_shape[1], self.source_shape[0]),
+                              flags=cv2.INTER_NEAREST) > 0
+
+    def lift(self, lift):
+        """The calibrated lift in the turned frame."""
+        return lambda point: self.forward(lift(self.backward(point)))
+
+    def line_back(self, line) -> list[list[int]]:
+        return [[int(round(v)) for v in self.backward(point)] for point in line]
+
+
 def slab_edges(mask: np.ndarray, gray: np.ndarray, lift, contact: list[list[int]] | None = None,
-               ) -> tuple[list[list[int]], dict]:
+               direction=None, floor: np.ndarray | None = None, strict_floor: bool = True) -> tuple[list[list[int]], dict]:
     """The top front edge of one sheet's slab, from its mask, and how it was found.
+
+    direction: the unit image vector the sheet is pushed in (push_direction); the front is the end of the slab in
+    that direction, and the measurements below run on the image turned so that it points down (Rotation). Without
+    it the front is the lower outline (towards the camera). floor: the floor mask; when given, the share of floor
+    just ahead of the front is recorded (info["floor_ahead"]) and, with strict_floor, must reach 60% (a
+    container's flat top has a side face there instead; SAM3's floor mask often stops at a sheet's shadow, so the
+    sheet a forklift is known to push is not refused for it).
 
     The edge is the lower outline of the mask between the front corners (floor_contact_edge) moved up by the height
     of the black front side face measured on the photo (side_face_height). The lower outline alone is not enough:
@@ -368,13 +506,43 @@ def slab_edges(mask: np.ndarray, gray: np.ndarray, lift, contact: list[list[int]
     lift(pixel) is the image position of the point one sheet thickness above the floor point seen at a pixel
     (calibrated camera): it bounds the search, and it is the whole estimate only when the photo shows no rim (a
     dark load on a dark sheet), which is less accurate."""
+    if direction is not None:
+        turn = Rotation(direction, mask.shape, front=front_direction(mask, direction))
+        if not turn.trivial:
+            edge_r, info = slab_edges(turn.warp_mask(mask), turn.warp_gray(gray), turn.lift(lift),
+                                      floor=None if floor is None else turn.warp_mask(floor), strict_floor=strict_floor)
+            info = {**info, "floor_contact_px": turn.line_back(info["floor_contact_px"]),
+                    "rotation_deg": round(turn.angle, 1), "push_direction": [round(float(v), 3) for v in direction],
+                    "turned_frame": {"edge_px": edge_r, "front_corners_px": info.get("front_corners_px")}}
+            return turn.line_back(edge_r), info
     if contact is None:
-        contact = floor_contact_edge(mask)
+        # in perspective the front edge of a sheet pushed across the view can lean up to about 45 degrees
+        contact = floor_contact_edge(mask, max_angle_deg=50)
         if contact is None:
             raise RuntimeError("the sheet's mask has no straight lower outline to find its front edge from")
+    if floor is not None:
+        # a sheet lies on the floor. SAM3's LSP prompts also return the flat tops of containers and of stacks,
+        # which have a side face below their front edge, not floor (most cam01 "LSP" masks, 2026-10-05).
+        xs = np.arange(contact[0][0], contact[1][0] + 1)
+        ys = np.round(np.interp(xs, [contact[0][0], contact[1][0]], [contact[0][1], contact[1][1]])).astype(int)
+        ahead = np.mean([floor[np.clip(ys + d, 0, floor.shape[0] - 1), np.clip(xs, 0, floor.shape[1] - 1)].mean()
+                         for d in (8, 12, 16)])
+        if ahead < .6 and strict_floor:
+            raise RuntimeError(f"no floor ahead of the sheet's front edge ({ahead:.0%} floor): not a sheet on the "
+                               "floor, or the front is not where the push direction says")
     lifted = [[int(v) for v in lift(point)] for point in contact]
     thickness = float(np.mean([c[1] - e[1] for c, e in zip(contact, lifted)]))
     info = {"floor_contact_px": contact, "thickness_px": round(thickness, 1)}
+    if floor is not None:
+        info["floor_ahead"] = round(float(ahead), 2)
+    if thickness < 2:
+        # the lift does not go up this outline: the front side face is hidden (the sheet is pushed away from the
+        # camera, or across the view at a grazing angle), so the outline is the top face's own edge
+        ends = top_face_ends(mask, contact, 4.)
+        edge = [[x, y] for x, y in contact]
+        if ends is not None:
+            edge = [[ends[0], int(round(line_y(contact, ends[0])))], [ends[1], int(round(line_y(contact, ends[1])))]]
+        return edge, {"method": "outline_is_top_edge", "edge_observed": True, "top_face_ends_px": ends, **info}
     halves = side_face_height(mask, gray, contact, thickness)
     if halves is None:
         return lifted, {"method": "floor_contact_lifted_by_thickness", "edge_observed": False, **info}
@@ -388,8 +556,10 @@ def slab_edges(mask: np.ndarray, gray: np.ndarray, lift, contact: list[list[int]
         measured = [half for half in halves if half]
         heights = [sum(h * n for _, h, n in measured) / sum(n for _, _, n in measured)] * 2
     edge = [[x, int(round(y - h))] for (x, _), (_, y), h in zip(lifted, contact, heights)]
-    # the side edges sharpen the front corners: the mask's extent is rounded by a few pixels
-    sides = side_edges(mask, gray, contact, edge)
+    # the sheet's extent is where its top face ends on the rim, not where the shadow ends on the floor (a sheet
+    # held off the floor casts a smaller shadow); the side edges then sharpen the corners
+    ends = top_face_ends(mask, edge, thickness)
+    sides = side_edges(mask, gray, contact, edge, rim_ends=ends)
     for i, side in enumerate(("left", "right")):
         x = sides["corners_px"]["rim"][side] + (lifted[i][0] - contact[i][0])
         edge[i] = [int(x), int(round(line_y(edge, x)))]
@@ -397,7 +567,7 @@ def slab_edges(mask: np.ndarray, gray: np.ndarray, lift, contact: list[list[int]
                   "side_face_px": [round(h, 1) for h in heights],
                   "rim_columns": [half[2] if half else 0 for half in halves],
                   "side_edges": {k: v for k, v in sides.items() if k != "corners_px"},
-                  "front_corners_px": sides["corners_px"], **info}
+                  "front_corners_px": sides["corners_px"], "top_face_ends_px": ends, **info}
 
 
 def trim_to_slab(mask: np.ndarray, rim: list[list[int]], thickness_px: float,
@@ -425,9 +595,15 @@ def trim_to_slab(mask: np.ndarray, rim: list[list[int]], thickness_px: float,
     return trimmed, int(mask.sum() - trimmed.sum())
 
 
-def sheet_footprint(mask: np.ndarray, gray: np.ndarray, lift) -> tuple[np.ndarray, dict]:
-    """A sheet's mask trimmed of its shadow (slab_edges, then trim_to_slab). A mask without a straight lower
-    outline is returned as it is."""
+def sheet_footprint(mask: np.ndarray, gray: np.ndarray, lift, direction=None) -> tuple[np.ndarray, dict]:
+    """A sheet's mask trimmed of its shadow (slab_edges, then trim_to_slab), in the frame turned to the push
+    direction when one is given. A mask without a straight front outline is returned as it is."""
+    turn = Rotation(direction, mask.shape) if direction is not None else None
+    if turn is not None and not turn.trivial:
+        trimmed, info = sheet_footprint(turn.warp_mask(mask), turn.warp_gray(gray), turn.lift(lift))
+        if "rim_px" in info:
+            info["rim_px"] = turn.line_back(info["rim_px"])
+        return turn.unwarp_mask(trimmed) & mask, info
     try:
         rim, info = slab_edges(mask, gray, lift)
     except RuntimeError:
@@ -437,11 +613,99 @@ def sheet_footprint(mask: np.ndarray, gray: np.ndarray, lift) -> tuple[np.ndarra
                      "shadow_px_removed": removed}
 
 
+def trim_below_rim(mask: np.ndarray, rim: list[list[int]], lift, direction=None) -> tuple[np.ndarray, int]:
+    """trim_to_slab for a sheet whose rim is known (the original sheet, its rim being the shared edge), with the
+    thickness at the rim from the calibrated lift, in the frame turned to the push direction."""
+    turn = Rotation(direction, mask.shape) if direction is not None else None
+    if turn is not None and not turn.trivial:
+        rim_r = [list(turn.forward(p)) for p in rim]
+        lift_r = turn.lift(lift)
+        thickness = float(np.mean([y - lift_r((x, y))[1] for x, y in rim_r]))
+        trimmed, removed = trim_to_slab(turn.warp_mask(mask), rim_r, thickness)
+        trimmed = turn.unwarp_mask(trimmed) & mask
+        return trimmed, int(mask.sum() - trimmed.sum())
+    thickness = float(np.mean([y - lift((x, y))[1] for x, y in rim]))
+    return trim_to_slab(mask, rim, thickness)
+
+
+FORK_GAP_PX = 20       # the forks show between the truck's mask and its load
+MIN_TOUCH_PX = 50
+
+
+def pushed_sheet(masks: dict[str, list[np.ndarray]], shape: tuple[int, int],
+                 sheet_at=None) -> tuple[np.ndarray, np.ndarray] | None:
+    """The LSP a forklift pushes and that forklift's body: the largest LSP mask that touches a forklift mask (or
+    a cargo touching it), mostly outside it. SAM3 often takes the load into the forklift mask; masks that sit
+    mostly inside it are removed first (as find_valid_frames does). None without such a pair. sheet_at: a pixel
+    on the sheet to use (find_valid_frames knows which forklift pushes which sheet from the motion between
+    samples; one frame cannot tell a pushed sheet from one parked beside a forklift): then that sheet, with the
+    forklift nearest to it."""
+    from scipy.ndimage import binary_dilation
+
+    def touches(near, mask):
+        return int(np.count_nonzero(near & mask)) >= MIN_TOUCH_PX
+
+    wanted = None
+    if sheet_at is not None:
+        x, y = int(round(sheet_at[0])), int(round(sheet_at[1]))
+        on = [m for m in masks.get("LSP", []) if 0 <= y < m.shape[0] and 0 <= x < m.shape[1] and m[y, x]]
+        if not on:
+            def distance(m):
+                ys, xs = np.nonzero(m)
+                return float(np.hypot(xs.mean() - x, ys.mean() - y))
+            on = sorted(masks.get("LSP", []), key=distance)[:1]
+            if on and distance(on[0]) > 80:
+                raise RuntimeError(f"no LSP mask at or near the given sheet position {sheet_at}")
+        if not on:
+            raise RuntimeError("SAM3 found no LSP mask")
+        wanted = max(on, key=lambda m: int(m.sum()))
+    best = None
+    for forklift in masks.get("forklift", []):
+        inside = [m for m in masks.get("LSP", []) + masks.get("cargo", []) if np.count_nonzero(m & forklift) > .5 * np.count_nonzero(m)]
+        body = forklift & ~np.logical_or.reduce(inside) if inside else forklift
+        if np.count_nonzero(body) < 1200:
+            body = forklift
+        near = binary_dilation(body, iterations=FORK_GAP_PX)
+        carried = [c for c in masks.get("cargo", []) if touches(near, c)]
+        carried_near = binary_dilation(np.logical_or.reduce(carried), iterations=12) if carried else None
+        for lsp in masks.get("LSP", []):
+            if wanted is not None and lsp is not wanted:
+                continue
+            if np.count_nonzero(lsp & ~body) <= .5 * np.count_nonzero(lsp):
+                continue
+            if touches(near, lsp) or (carried_near is not None and touches(carried_near, lsp)):
+                if best is None or np.count_nonzero(lsp) > np.count_nonzero(best[0]):
+                    best = (lsp, body)
+    if best is None and wanted is not None and masks.get("forklift"):
+        # the wanted sheet touches no forklift mask (SAM3 cut the forks): the nearest forklift pushes it
+        ys, xs = np.nonzero(wanted)
+        def gap(f):
+            fy, fx = np.nonzero(f)
+            return float(np.hypot(fx.mean() - xs.mean(), fy.mean() - ys.mean()))
+        best = (wanted, min(masks["forklift"], key=gap))
+    return best
+
+
 def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int], gray: np.ndarray,
-                lift) -> tuple[list[list[int]], dict]:
-    """Find the central loaded LSP by cargo overlap and the top front edge of that slab (slab_edges): the edge a
-    second sheet shares with it."""
+                lift, sheet_at=None) -> tuple[list[list[int]], dict]:
+    """The top front edge of the loaded LSP's slab (slab_edges): the edge a second sheet shares with it.
+    sheet_at: a pixel on the sheet to use (see pushed_sheet).
+
+    The sheet is the one a forklift pushes (pushed_sheet), and its front is the end of the slab in the push
+    direction, from the forklift's centroid to the sheet's: the shared edge, the sheet's centre and the forklift
+    lie on one line. Without a forklift mask (cam01: SAM3 finds none behind the load) the loaded sheet is found
+    by cargo overlap near the frame's centre and its front is taken towards the camera."""
     width, height = image_size
+    floor = union(masks.get("floor", []), (height, width))
+    pair = pushed_sheet(masks, (height, width), sheet_at)
+    if pair is not None:
+        lsp, body = pair
+        direction = push_direction(lsp, body)
+        edge, info = slab_edges(lsp, gray, lift, direction=direction, floor=floor, strict_floor=False)
+        fy, fx = np.nonzero(body)
+        return edge, {**info, "sheet_choice": "pushed_by_forklift", "lsp_bbox": bbox(lsp),
+                      "forklift_centroid_px": [round(float(fx.mean()), 1), round(float(fy.mean()), 1)],
+                      "push_direction": [round(float(v), 3) for v in direction]}
     cargo = []
     for mask in masks.get("cargo", []):
         box = bbox(mask)
@@ -453,7 +717,6 @@ def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int],
         raise RuntimeError("SAM3 found no suitable central cargo; supply --contact-edge")
     cargo_box = min(cargo)[1]
     candidates = []
-    floor = union(masks.get("floor", []), (height, width))
     for mask in masks.get("LSP", []):
         box = bbox(mask)
         if not box:
@@ -480,7 +743,8 @@ def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int],
                            "supply --contact-edge")
     _, mask, box, contact = max(candidates, key=lambda item: item[0])
     edge, info = slab_edges(mask, gray, lift, contact)
-    return edge, {**info, "cargo_bbox": cargo_box, "lsp_bbox": box}
+    return edge, {**info, "sheet_choice": "cargo_near_centre", "push_direction": [0., 1.],
+                  "cargo_bbox": cargo_box, "lsp_bbox": box}
 
 
 class MogePoints:
@@ -841,7 +1105,7 @@ def outline(mask: np.ndarray) -> list[list[int]]:
 def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[str, list[np.ndarray]],
                           region: Image.Image, points: np.ndarray, valid: np.ndarray, floor: np.ndarray,
                           edge_px: list[list[int]], toward_px, depth_to_width: float, gray: np.ndarray | None = None,
-                          lift=None) -> dict:
+                          lift=None, direction=None) -> dict:
     """One new LSP inside the edit region (added_sheet), no cargo yet, and the new sheet's orientation, size and
     position equal to the original's on the floor plane (compare_sheets). With the candidate's grey image and the
     camera's lift, both sheets are measured without their shadows (sheet_footprint, trim_to_slab)."""
@@ -850,7 +1114,7 @@ def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[s
     count, sheet = added_sheet(source, candidate, region, edge_px, toward_px)
     result = {"new_lsp_instances": count}
     if sheet is not None and gray is not None and lift is not None:
-        sheet, footprint = sheet_footprint(sheet, gray, lift)
+        sheet, footprint = sheet_footprint(sheet, gray, lift, direction)
         result["new_sheet"] = footprint
     failures = []
     if count != 1:
@@ -861,8 +1125,7 @@ def verify_sheet_geometry(source: dict[str, list[np.ndarray]], candidate: dict[s
     if sheet is not None:
         old = sheet_at_edge(source.get("LSP", []), edge_px)
         if old is not None and lift is not None:
-            thickness = float(np.mean([y - lift((x, y))[1] for x, y in edge_px]))
-            old, result["old_sheet_shadow_px_removed"] = trim_to_slab(old, edge_px, thickness)
+            old, result["old_sheet_shadow_px_removed"] = trim_below_rim(old, edge_px, lift, direction)
         result.update(compare_sheets(points, valid, floor, old, edge_px, toward_px, sheet, depth_to_width))
         failures = result["failures"] + failures
     result.update({"passed": not failures, "failures": failures})

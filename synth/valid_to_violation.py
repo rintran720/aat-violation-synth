@@ -223,9 +223,10 @@ class Camera:
 
 
 def make_geometry_guide(source: Path, contact_edge: list[list[int]], work: Path,
-                        camera_path: Path | None = None, calibration_path: Path | None = None) -> Path:
+                        camera_path: Path | None = None, calibration_path: Path | None = None,
+                        direction=None) -> Path:
     """Mark the original sheet's shared edge on the frame (the guide image) and project one calibrated LSP depth
-    from it.
+    from it, on the side of the edge the push direction points to (image vector; default towards the camera).
 
     The projected sheet is not shown to the image model: it bounds the edit region and, through geometry.json (which
     also keeps the new sheet's world corners on its top face), places the cargo's target box.
@@ -244,7 +245,9 @@ def make_geometry_guide(source: Path, contact_edge: list[list[int]], work: Path,
     for sign in (-1, 1):
         delta = np.array([*(normal * depth_m * sign), 0.0])
         candidates.append((camera.project(a + delta), camera.project(b + delta), a + delta, b + delta))
-    near_left, near_right, far_a, far_b = max(candidates, key=lambda c: (c[0][1] + c[1][1]) / 2)   # toward the camera
+    dx, dy = (0., 1.) if direction is None else (float(direction[0]), float(direction[1]))
+    near_left, near_right, far_a, far_b = max(candidates, key=lambda c: (c[0][0] + c[1][0]) / 2 * dx
+                                              + (c[0][1] + c[1][1]) / 2 * dy)   # along the push
     shared_left, shared_right = tuple(contact_edge[0]), tuple(contact_edge[1])
     with Image.open(source) as original:
         guide = original.convert("RGB")
@@ -306,6 +309,27 @@ def cargo_box_on_sheet(outline: list[list[int]], edge: list[list[int]], lsp_size
             int(np.ceil(points[:, 0].max())), int(np.ceil(points[:, 1].max()))]
 
 
+def sheet_position(args: argparse.Namespace, source: Path) -> list[float] | None:
+    """A pixel on the pushed sheet: --sheet-at, else the lsp_c of the find_valid_frames index that lists the
+    frame (index.json in the input's folder or its parent: <out>/accepted/<frame>.jpg sits beside <out>/index.json)."""
+    given = getattr(args, "sheet_at", None)
+    if given:
+        x, y = (float(v.strip()) for v in given.split(","))
+        return [x, y]
+    for folder in (source.parent, source.parent.parent):
+        index = folder / "index.json"
+        if not index.is_file():
+            continue
+        try:
+            frames = json.loads(index.read_text()).get("frames", [])
+        except (OSError, ValueError, AttributeError):
+            continue
+        for entry in frames:
+            if Path(entry.get("frame", "")).stem == source.stem and entry.get("lsp_c"):
+                return [float(v) for v in entry["lsp_c"]]
+    return None
+
+
 def image_shape_ok(source: Path, candidate: Path) -> bool:
     """The image model's RAW output keeps the source aspect ratio and a usable size (a composite always would)."""
     with Image.open(source) as original, Image.open(candidate) as edited:
@@ -330,6 +354,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--contact-edge",
                         help="Override the loaded LSP's top front edge: x1,y1,x2,y2 in source pixels")
+    parser.add_argument("--sheet-at", help="x,y of a pixel on the pushed LSP (default: the find_valid_frames index "
+                                           "next to the input, when it lists the frame)")
     parser.add_argument("--reuse-sheet", type=Path, help="Reverify a previously generated empty LSP and continue with cargo")
     parser.add_argument("--reuse-cargo", type=Path, help="Reverify a previously generated cargo candidate after --reuse-sheet")
     parser.add_argument("--editor", choices=("codex", "api"), default="codex",
@@ -558,7 +584,9 @@ def main() -> int:
             edge = [[values[0], values[1]], [values[2], values[3]]]
             anchor_info = {"method": "manual_override", "edge_observed": False}
         else:
-            edge, anchor_info = source_edge(source_masks, size, gray, lift)
+            sheet_at = sheet_position(args, source)
+            edge, anchor_info = source_edge(source_masks, size, gray, lift, sheet_at)
+            anchor_info["sheet_at_px"] = sheet_at
         report["anchor"] = {"contact_edge_px": edge, **anchor_info}
         save_report()
         if build_catalogue_map:
@@ -574,7 +602,9 @@ def main() -> int:
             report["reference_view"] = json.loads(args.reference_map.read_text()).get("view")
             save_report()
         ref_name = "catalogue" if getattr(args, "reference_map", None) else "Step A"
-        guide = make_geometry_guide(source, edge, work, camera_path=camera_path, calibration_path=calibration_path)
+        direction = anchor_info.get("push_direction")
+        guide = make_geometry_guide(source, edge, work, camera_path=camera_path, calibration_path=calibration_path,
+                                    direction=direction)
         geometry = json.loads((work / "geometry.json").read_text())
         expected_width, calibrated_depth = (float(v) for v in
                                             json.loads(calibration_path.read_text())["lsp_measured_size_m"][:2])
@@ -638,7 +668,7 @@ def main() -> int:
             points, valid = moge.get(candidate)
             candidate_gray = np.asarray(Image.open(candidate).convert("L"))
             measured = verify_sheet_geometry(source_masks, candidate_masks, sheet_region, points, valid, floor, edge,
-                                             toward, calibrated_depth / measured_width, candidate_gray, lift)
+                                             toward, calibrated_depth / measured_width, candidate_gray, lift, direction)
             if args.aesthetic_review:
                 count_call(report, "visual review - LSP realism (Astra)")
             result = gate("sheet", source, raw, candidate, sheet_region, protected, measured, source, polygon,
@@ -667,7 +697,7 @@ def main() -> int:
         if sheet is None:
             report["stopped_at"] = "no_new_sheet_to_measure"
             return 2
-        sheet = sheet_footprint(sheet, np.asarray(Image.open(accepted_sheet).convert("L")), lift)[0]   # no shadow
+        sheet = sheet_footprint(sheet, np.asarray(Image.open(accepted_sheet).convert("L")), lift, direction)[0]   # no shadow
         sheet_outline = outline(sheet)
         report["accepted_sheet_outline_px"] = sheet_outline
         save_report()
