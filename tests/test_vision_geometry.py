@@ -359,18 +359,22 @@ class VisionGeometryTests(unittest.TestCase):
         contact = [[55, 107], [236, 116]]                                   # from the rounded mask: 3-4 px short
         rim = [[55, 100], [236, 110]]
         sides = side_edges(mask, gray, contact, rim)
-        self.assertEqual(sides["left"]["kind"], "bottom")                   # the dark left side face shows
+        self.assertEqual(sides["left"]["kind"], "bottom")                   # the dark left side face shows...
+        self.assertTrue(sides["left"]["pair"])                              # ...with the top edge parallel to it
         self.assertEqual(sides["right"]["kind"], "top")                     # the right side is hidden
+        self.assertFalse(sides["right"]["pair"])
         self.assertLess(abs(sides["left"]["angle_deg"] - 63), 6)            # atan(60 / 30)
         self.assertLess(abs(sides["right"]["angle_deg"] - 67), 6)           # both lean right going back
-        self.assertLess(abs(sides["corners_px"]["left"] - 51), 3)           # where the left bottom edge meets the floor line
-        self.assertLess(abs(sides["corners_px"]["right"] - 240), 3)
+        self.assertLess(abs(sides["corners_px"]["contact"]["left"] - 51), 3)   # left bottom edge meets the floor line
+        self.assertLess(abs(sides["corners_px"]["rim"]["left"] - 60), 3)       # left top edge meets the rim: the
+        self.assertLess(abs(sides["corners_px"]["rim"]["right"] - 240), 3)     # rim stops short of the side face
 
     def test_source_edge_uses_the_side_lines_for_the_corners(self):
         mask, gray, cargo = self.slab_with_sides()
         masks = {"LSP": [mask], "cargo": [cargo], "floor": [~(mask | cargo)]}
         edge, info = source_edge(masks, (300, 200), gray, lambda p: (p[0], p[1] - 7))
         self.assertIn("side_edges", info)
+        self.assertLess(abs(edge[0][0] - 60), 3)                            # not out over the left side face
         self.assertLess(abs(edge[1][0] - 240), 3)
         self.assertLess(abs(edge[1][1] - 110), 2.5)
 

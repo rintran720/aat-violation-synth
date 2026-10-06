@@ -557,11 +557,11 @@ def main() -> int:
                      for key in ("forklift", "cargo", "LSP")]
         # the loaded sheet's front side face and the shadow under it lie below the shared edge, between its front
         # corners; the new sheet in front hides them, so they are free to paint (everything else of the original
-        # stays pixel for pixel, including other sheets further down the frame)
+        # stays pixel for pixel: its side faces beyond the corners, and other sheets further down the frame)
         loaded = sheet_at_edge(source_masks.get("LSP", []), edge)
         if loaded is not None:
             columns = np.arange(size[0])
-            span = (columns >= min(edge[0][0], edge[1][0]) - 15) & (columns <= max(edge[0][0], edge[1][0]) + 15)
+            span = (columns >= min(edge[0][0], edge[1][0])) & (columns <= max(edge[0][0], edge[1][0]))
             protected[2] &= ~(below_line(loaded, edge, toward=np.mean(geometry["new_lsp_near_edge_px"], axis=0)) & span)
 
         # ---- stage 1: one empty LSP ----

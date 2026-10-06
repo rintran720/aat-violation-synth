@@ -203,23 +203,69 @@ def line_y(line: list[list[int]], x: float) -> float:
     return y0 + (y1 - y0) * (x - x0) / max(x1 - x0, 1e-6)
 
 
+def parallel_inside(gray: np.ndarray, mask: np.ndarray, slope: float, offset: float, rows: np.ndarray,
+                    sign: int) -> tuple[float, float, int] | None:
+    """A second side edge inside the mask, parallel to the outline's line x = offset + slope * y: the line fitted to
+    the detector's segments that run within 15 degrees of it, 3-25 px inward, over the same rows. Where a side
+    face is in view the outline is its bottom edge and this is the top edge. Returns (slope, offset, segments)."""
+    import cv2
+
+    y0, y1 = int(rows.min()), int(rows.max())
+    x_line = offset + slope * np.array([y0, y1])
+    cx0 = int(max(0, min(x_line) - 30))
+    cx1 = int(min(gray.shape[1], max(x_line) + 31))
+    if cx1 - cx0 < 8 or y1 - y0 < 8:
+        return None
+    found = cv2.createLineSegmentDetector().detect(np.ascontiguousarray(gray[y0:y1 + 1, cx0:cx1]))[0]
+    if found is None:
+        return None
+    points, length = [], 0.
+    for xa, ya, xb, yb in found.reshape(-1, 4) + [cx0, y0, cx0, y0]:
+        if abs(yb - ya) < 6 or np.hypot(xb - xa, yb - ya) < 8:
+            continue
+        angle = np.degrees(np.arctan2(xb - xa, yb - ya))                     # of x against y, like `slope`
+        if abs(((angle - np.degrees(np.arctan(slope))) + 90) % 180 - 90) > 15:
+            continue
+        mx, my = (xa + xb) / 2, (ya + yb) / 2
+        inward = (mx - (offset + slope * my)) * sign                         # distance inward of the outline line
+        if not 3 <= inward <= 25 or not mask[int(my), int(mx)]:
+            continue
+        points += [(xa, ya), (xb, yb)]
+        length += float(np.hypot(xb - xa, yb - ya))
+    if length < 20:
+        return None
+    pts = np.asarray(points, dtype=float)
+    fit = np.polyfit(pts[:, 1], pts[:, 0], 1)                                 # x = fit[0] * y + fit[1]
+    return float(fit[0]), float(fit[1]), len(points) // 2
+
+
 def side_edges(mask: np.ndarray, gray: np.ndarray, contact: list[list[int]], rim: list[list[int]]) -> dict:
     """The sheet's side edges, which run back from its front corners, and the front corners they give.
 
     The slab has four side edges: left top, left bottom, right top, right bottom. The mask's outline shows one per
     side: the bottom edge where that side face is in view (a dark strip just inside the outline), the top edge
-    where it is not. Each is a line fitted to the outline rows above the front band. Its crossing with the front
-    line of the same height (contact line for a bottom edge, rim for a top edge) is a front corner, sharper than
-    the mask's rounded extent; the other corner on that side is straight above or below it. Returns
-    {"left": {...} | None, "right": {...} | None, "corners_px": {"left": x, "right": x}} with the x of each front
-    corner; a side without a usable line keeps the contact line's end. angle_deg is the direction of the edge
-    going back from the front, from the image's +x axis with y up: 90 is straight up, more leans left."""
+    where it is not. Each is a line fitted to the outline rows above the front band. Where the side face is in
+    view, its top edge is a second line inside the mask, parallel to the outline (parallel_inside): the pair is
+    what bounds the rim, because the rim ends at the top corner, inside the side face's width, not at the mask's
+    outline (s_003: the rim reached 13 px out over the left side face, and the new sheet was painted over it).
+    A line's crossing with the front line of the same height (contact line for a bottom edge, rim for a top edge)
+    is a front corner, sharper than the mask's rounded extent; the other corner on that side is straight above or
+    below it. Returns {"left": {...} | None, "right": {...} | None, "corners_px": {"rim": {"left": x, "right":
+    x}, "contact": {...}}}; a side without a usable line keeps the contact line's ends. angle_deg is the direction
+    of the edge going back from the front, from the image's +x axis with y up: 90 is straight up, more leans
+    left."""
     (x0, y0), (x1, y1) = contact
-    result = {"corners_px": {"left": x0, "right": x1}}
+    result = {"corners_px": {"rim": {"left": x0, "right": x1}, "contact": {"left": x0, "right": x1}}}
     band = below_line(mask, rim, toward=[(x0 + x1) / 2, max(y0, y1) + 5])
     dark = float(np.median(gray[band])) if band.any() else 20.
     face_pixels = mask & ~band
     light = float(np.percentile(gray[face_pixels], 75)) if face_pixels.any() else dark + 60
+
+    def crossing(slope, offset, front_line):
+        (fx0, fy0), (fx1, fy1) = front_line                                  # x = offset + slope * y meets the line
+        m = (fy1 - fy0) / max(fx1 - fx0, 1e-6)
+        return (offset + slope * (fy0 - m * fx0)) / (1 - slope * m)
+
     for side, pick, sign in (("left", np.argmax, 1), ("right", lambda row: len(row) - 1 - np.argmax(row[::-1]), -1)):
         rows, xs = [], []
         for y in range(int(mask.shape[0])):
@@ -238,25 +284,34 @@ def side_edges(mask: np.ndarray, gray: np.ndarray, contact: list[list[int]], rim
         if line is None:
             continue
         slope, offset, inliers = line                                        # x = offset + slope * y
+        rows_in = np.array(rows)[inliers]
         inside = np.array([gray[y, min(max(int(round(offset + slope * y)) + sign * 3, 0), gray.shape[1] - 1)]
-                           for y in np.array(rows)[inliers]])
-        kind = "bottom" if float(np.median(inside)) < dark + .35 * (light - dark) else "top"
-        front_line = contact if kind == "bottom" else rim
-        # crossing of x = offset + slope * y with the front line y = line_y(front_line, x)
-        (fx0, fy0), (fx1, fy1) = front_line
-        m = (fy1 - fy0) / max(fx1 - fx0, 1e-6)
-        x = (offset + slope * (fy0 - m * fx0)) / (1 - slope * m)
+                           for y in rows_in])
+        pair = parallel_inside(gray, mask, slope, offset, rows_in, sign)
+        if pair is not None:                                                 # a side face: dark between the two lines
+            between = np.array([gray[y, min(max(int(round((offset + slope * y + pair[1] + pair[0] * y) / 2)), 0),
+                                            gray.shape[1] - 1)] for y in rows_in])
+            if float(np.median(between)) >= dark + .5 * (light - dark):
+                pair = None
+        kind = "bottom" if pair is not None or float(np.median(inside)) < dark + .35 * (light - dark) else "top"
         # SAM3 rounds the corner: where the outline leaves the line before the front, the corner is straight
         # below the last point on it (the slab's vertical front edge), not further along the line
-        y_last = max(np.array(rows)[inliers])
+        y_last = float(rows_in.max())
         x_last = offset + slope * y_last
-        if line_y(rim, x_last) - y_last > 4:
-            x = x_last
+        short = line_y(rim, x_last) - y_last > 4
+        x = x_last if short else crossing(slope, offset, contact if kind == "bottom" else rim)
         angle = float(np.degrees(np.arctan2(1, -slope)))     # of the edge going back: 90 straight up, >90 leaning left
-        result[side] = {"kind": kind, "angle_deg": round(angle, 1),
-                        "rows": int(inliers.sum()), "crossing_px": round(float(x), 1)}
-        if abs(x - result["corners_px"][side]) <= 12:                        # a plausible corner refines the end
-            result["corners_px"][side] = int(round(x))
+        result[side] = {"kind": kind, "angle_deg": round(angle, 1), "rows": int(inliers.sum()),
+                        "crossing_px": round(float(x), 1), "pair": pair is not None}
+        corners = result["corners_px"]
+        if abs(x - corners["contact"][side]) <= 12:                           # a plausible corner refines the end
+            corners["contact"][side] = int(round(x))
+            corners["rim"][side] = int(round(x))
+        if pair is not None:                                                 # the top edge bounds the rim itself
+            top_x = crossing(pair[0], pair[1], rim)
+            result[side]["top_edge_crossing_px"] = round(float(top_x), 1)
+            if abs(top_x - corners["rim"][side]) <= 25:
+                corners["rim"][side] = int(round(top_x))
     return result
 
 
@@ -345,12 +400,13 @@ def source_edge(masks: dict[str, list[np.ndarray]], image_size: tuple[int, int],
     # the side edges sharpen the front corners: the mask's extent is rounded by a few pixels
     sides = side_edges(mask, gray, contact, edge)
     for i, side in enumerate(("left", "right")):
-        x = sides["corners_px"][side] + (lifted[i][0] - contact[i][0])
+        x = sides["corners_px"]["rim"][side] + (lifted[i][0] - contact[i][0])
         edge[i] = [int(x), int(round(line_y(edge, x)))]
     return edge, {"method": "side_face_top", "edge_observed": True, "reference": reference,
                   "side_face_px": [round(h, 1) for h in heights],
                   "rim_columns": [half[2] if half else 0 for half in halves],
-                  "side_edges": {k: v for k, v in sides.items() if k != "corners_px"}, **info}
+                  "side_edges": {k: v for k, v in sides.items() if k != "corners_px"},
+                  "front_corners_px": sides["corners_px"], **info}
 
 
 class MogePoints:
