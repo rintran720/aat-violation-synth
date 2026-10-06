@@ -23,7 +23,7 @@ def args_for(root: Path, source: Path, output: Path, **extra) -> argparse.Namesp
                   step_a_index=root / "index.json", image_cli=root / "unused.py", codex_bin="codex",
                   contact_edge="20,50,80,50", reference_map=None, reuse_sheet=None, reuse_cargo=None,
                   camera=root / "camera.json", calibration=root / "calibration.json", aesthetic_review=True,
-                  measure_only=False)
+                  measure_only=False, references="step-a", cargo_kind=None, cargo_skid="any", seed=0)
     values.update(extra)
     return argparse.Namespace(**values)
 
@@ -89,7 +89,7 @@ class ValidToViolationTests(unittest.TestCase):
             self.assertFalse((root / "out.png").exists())
 
     def run_pipeline(self, root: Path, aesthetic: dict | None, drift_passes: bool = True, sheet_geometry=None,
-                     max_attempts: int = 1, measure_only: bool = False):
+                     max_attempts: int = 1, measure_only: bool = False, references: str = "step-a"):
         """aesthetic None: run without the realism review (the default of the command line)."""
         source = root / "valid.png"
         Image.new("RGB", (120, 110), "gray").save(source)
@@ -105,7 +105,7 @@ class ValidToViolationTests(unittest.TestCase):
             refs[category] = ref
         output = root / "final.png"
         args = args_for(root, source, output, max_attempts=max_attempts, aesthetic_review=aesthetic is not None,
-                        measure_only=measure_only)
+                        measure_only=measure_only, references=references)
         review = (mock.patch.object(pipeline, "astra", return_value=aesthetic) if aesthetic is not None else
                   mock.patch.object(pipeline, "astra", side_effect=AssertionError("realism review is switched off")))
         calls = []
@@ -140,11 +140,34 @@ class ValidToViolationTests(unittest.TestCase):
             calls.append((raw.name, images[0].name, prompt, images))
             Image.new("RGB", (120, 110), "gray").save(raw)
 
+        built = []
+
+        def fake_build(image, edge, out, **options):
+            # the catalogue map, as synth.catalogue_reference_map would write it, into the run's work folder
+            built.append({"image": image, "edge": edge, "out": out, **options})
+            out.mkdir(parents=True)
+            entries = {}
+            for category in pipeline.CLASSES:
+                Image.new("RGB", (20, 20), "gray").save(out / f"{category}.png")
+                entries[category] = {"path": str(out / f"{category}.png"), "source": "3D catalogue"}
+            entries["LSP"]["size_m"] = [1.919, 1.87, 0.09]
+            entries["SKID"]["size_m"] = [1.2, 1.0, 0.13]
+            entries["cargo"]["size_m"] = [1.2, 1.0, 1.75]
+            entries["view"] = {"contact_edge_px": edge, "edge_given": options.get("edge_given"),
+                               "elevation_deg": 23.6, "azimuth_deg": 339.5,
+                               "render_view": {"elevation_deg": 30, "azimuth_deg": 0}}
+            (out / "reference_map.json").write_text(json.dumps(entries))
+            return out / "reference_map.json"
+
+        self.built = built
+
         passed = {"passed": True, "failures": []}
         drift = passed if drift_passes else {"passed": False, "failures": ["the image model changed the scene"]}
+        import synth.catalogue_reference_map as catalogue
         with (mock.patch.object(pipeline, "ROOT", root),
               mock.patch.object(pipeline, "parse_args", return_value=args),
               mock.patch.object(pipeline, "step_a_references", return_value=refs),
+              mock.patch.object(catalogue, "build_reference_map", side_effect=fake_build),
               mock.patch.object(pipeline, "Sam3Masks", FakeSam3),
               mock.patch.object(pipeline, "make_geometry_guide", side_effect=fake_guide),
               mock.patch.object(pipeline, "guided_edit", side_effect=fake_edit),
@@ -203,6 +226,29 @@ class ValidToViolationTests(unittest.TestCase):
             self.assertTrue(62 < box[3] <= 105 and 34 < (box[0] + box[2]) / 2 < 95)   # cargo stands on it
             self.assertIn(str(report["accepted_sheet_outline_px"]), calls[1][2])
             self.assertNotIn(str(report["target_polygon_px"]), calls[1][2])
+
+    def test_catalogue_references_are_built_from_the_measured_edge_into_the_run_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            code, _, calls, report = self.run_pipeline(Path(folder), None, references="catalogue")
+            self.assertEqual(code, 0)
+            self.assertEqual(len(self.built), 1)
+            self.assertEqual(self.built[0]["edge"], report["anchor"]["contact_edge_px"])   # matched to the edge
+            self.assertEqual(self.built[0]["out"].parent.name, Path(report["reference_map"]).parent.parent.name)
+            self.assertTrue(Path(report["reference_map"]).is_file())
+            self.assertEqual(Path(report["references"]["LSP"]).name, "LSP.png")
+            self.assertIn("reference_map", report["references"]["LSP"])      # the map's images, not Step A's
+            self.assertEqual(report["reference_view"]["render_view"], {"elevation_deg": 30, "azimuth_deg": 0})
+            self.assertIn("catalogue LSP appearance", calls[0][2])
+            self.assertEqual(report["cargo_target"]["lsp_size_m"], [1.919, 1.87])   # the map's sizes
+            self.assertEqual(report["cargo_target"]["skid_size_m"], [1.2, 1.0])
+            self.assertEqual(report["cargo_target"]["height_m"], 1.75)
+
+    def test_step_a_references_on_request(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            _, _, calls, report = self.run_pipeline(Path(folder), None, references="step-a")
+            self.assertEqual(self.built, [])
+            self.assertIsNone(report["reference_map"])
+            self.assertIn("Step A LSP appearance", calls[0][2])
 
     def test_measure_only_runs_each_stage_once_records_the_numbers_and_publishes_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

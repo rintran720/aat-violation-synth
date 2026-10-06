@@ -1,5 +1,7 @@
 """Reference map for synth.valid_to_violation (--reference-map) built from the 3D catalogue, view-matched.
 
+valid_to_violation builds this map itself by default (--references catalogue), matched to the shared edge it
+measured; this CLI is for building one by hand.
 Run: python -m synth.catalogue_reference_map --image <valid frame> [--contact-edge x1,y1,x2,y2]
      [--camera work/camera.json] [--seed 0] [--cargo-kind cargo_wrap] [--cargo-skid yes|no|any]
 Picks one labelled LSP, one SKID and one cargo model from work/catalogue3d (blender/build_catalogue.py) and,
@@ -106,68 +108,65 @@ def forklift_crop(index_path):
     raise SystemExit(f"no forklift crop in {index_path}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--image", type=Path, required=True)
-    parser.add_argument("--contact-edge", help="x1,y1,x2,y2 of the original LSP's shared edge in image pixels")
-    parser.add_argument("--camera", type=Path, default=ROOT / "work/camera.json")
-    parser.add_argument("--step-a-index", type=Path, default=ROOT / "work/refs/index.json")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--cargo-kind", help="e.g. cargo_wrap, cargo_wooden; default any")
-    parser.add_argument("--cargo-skid", choices=["yes", "no", "any"], default="any")
-    parser.add_argument("--views", type=int, default=3, help="views of the same object per reference image (1-5)")
-    parser.add_argument("--out", type=Path)
-    args = parser.parse_args()
-    cam = json.loads(args.camera.read_text())
-    with Image.open(args.image) as im:
+def build_reference_map(image: Path, edge, out: Path, *, camera: Path, step_a_index: Path, seed: int = 0,
+                        cargo_kind: str | None = None, cargo_skid: str = "any", views: int = 3,
+                        edge_given: bool = True) -> Path:
+    """Write the view-matched reference map for `image` into `out` and return its reference_map.json. `edge` is the
+    original LSP's shared edge in image pixels ([[x1, y1], [x2, y2]]); the camera's view of that spot picks the
+    renders. valid_to_violation calls this with the edge it measured; the CLI with --contact-edge or the image
+    centre."""
+    cam = json.loads(camera.read_text())
+    with Image.open(image) as im:
         if im.size != (cam["width"], cam["height"]):
-            raise SystemExit(f"{args.image} is {im.size}, the camera is {cam['width']}x{cam['height']}")
+            raise RuntimeError(f"{image} is {im.size}, the camera is {cam['width']}x{cam['height']}")
         source = im.convert("RGB")
-    if args.contact_edge:
-        x1, y1, x2, y2 = map(float, args.contact_edge.split(","))
-    else:
-        x1, y1, x2, y2 = cam["width"] * .4, cam["height"] * .5, cam["width"] * .6, cam["height"] * .5
-    edge = [(x1, y1), (x2, y2)]
+    edge = [(float(x), float(y)) for x, y in edge]
     elevation, azimuth = view_angles(cam, edge)
     el, az = nearest_view(elevation, azimuth)
 
-    variants = json.loads((CAT / "variants.json").read_text()); rng = random.Random(args.seed)
+    if not (CAT / "variants.json").is_file():
+        raise RuntimeError(f"the 3D catalogue is missing: {CAT / 'variants.json'} (build it with "
+                           "blender/build_catalogue.py, or run with --references step-a / --reference-map)")
+    variants = json.loads((CAT / "variants.json").read_text()); rng = random.Random(seed)
     def pick(pred):
         names = sorted(n for n, v in variants.items() if pred(n, v))
         if not names:
-            raise SystemExit("no catalogue variant matches")
+            raise RuntimeError("no catalogue variant matches")
         return rng.choice(names)
     picks = {
         "LSP": pick(lambda n, v: v["object"] == "lsp" and not n.startswith("lsp_stack")),
         "SKID": pick(lambda n, v: v["object"] == "skid" and not n.startswith("skid_stack")),
         "cargo": pick(lambda n, v: v["object"].startswith("cargo")
-                      and (not args.cargo_kind or v["object"] == args.cargo_kind)
-                      and (args.cargo_skid == "any" or n.endswith("_skid" if args.cargo_skid == "yes" else "_noskid"))),
+                      and (not cargo_kind or v["object"] == cargo_kind)
+                      and (cargo_skid == "any" or n.endswith("_skid" if cargo_skid == "yes" else "_noskid"))),
     }
-    out = args.out or CAT / "reference_maps" / args.image.stem; out.mkdir(parents=True, exist_ok=True)
-    ref = {"forklift": {"path": str(forklift_crop(args.step_a_index).relative_to(ROOT).as_posix()), "source": "Step A crop"}}
+    out.mkdir(parents=True, exist_ok=True)
+    ref = {"forklift": {"path": str(forklift_crop(step_a_index).relative_to(ROOT).as_posix()), "source": "Step A crop"}}
     for cat, name in picks.items():
         v = variants[name]
-        views = neighbour_views(el, az, args.views)
-        renders = [CAT / "renders" / v["object"] / name / f"e{e:02d}_a{a:03d}.png" for e, a in views]
+        chosen = neighbour_views(el, az, views)
+        renders = [CAT / "renders" / v["object"] / name / f"e{e:02d}_a{a:03d}.png" for e, a in chosen]
+        missing = [r for r in renders if not r.is_file()]
+        if missing:
+            raise RuntimeError(f"catalogue render missing: {missing[0]}")
         dest = view_sheet(renders, out / f"{cat}.png")
         ref[cat] = {"path": str(dest.relative_to(ROOT).as_posix()), "source": "3D catalogue", "variant": name,
                     "label": v["label"], "size_m": v["size_m"],
                     "views": [{"elevation_deg": e, "azimuth_deg": a, "render": str(r.relative_to(ROOT).as_posix())}
-                              for (e, a), r in zip(views, renders)]}
+                              for (e, a), r in zip(chosen, renders)]}
     ref["note"] = ("Appearance references only (colour, material, labels, film, deck boards). One object per image; "
                    "for LSP / SKID / cargo the large tile is the view matched to the camera and the small tiles are other "
                    "views of the SAME object. Not to scale and not for measuring: position, size and heading come from "
                    "the contact edge and the camera calibration, and are checked with SAM3.")
-    ref["view"] = {"contact_edge_px": [list(map(round, p)) for p in edge], "edge_given": bool(args.contact_edge),
-                   "camera": str(args.camera), "elevation_deg": round(elevation, 1), "azimuth_deg": round(azimuth, 1),
-                   "render_view": {"elevation_deg": el, "azimuth_deg": az}, "seed": args.seed}
+    ref["view"] = {"contact_edge_px": [list(map(round, p)) for p in edge], "edge_given": edge_given,
+                   "camera": str(camera), "elevation_deg": round(elevation, 1), "azimuth_deg": round(azimuth, 1),
+                   "render_view": {"elevation_deg": el, "azimuth_deg": az}, "seed": seed}
     (out / "reference_map.json").write_text(json.dumps(ref, indent=1))
 
-    # comparison: Step A references (valid_to_violation default) above, catalogue references below
+    # comparison: Step A references (valid_to_violation's --references step-a) above, catalogue references below
     from synth.valid_to_violation import step_a_references
     try:
-        old = step_a_references(args.step_a_index)
+        old = step_a_references(step_a_index)
     except RuntimeError:
         old = {}
     T = 260; sheet = Image.new("RGB", (5 * T, 2 * T + 60), (60, 60, 60)); d = ImageDraw.Draw(sheet)
@@ -183,8 +182,36 @@ def main():
                 sheet.paste(bg.convert("RGB"), (c * T + 5, 30 + r * (T + 15) + 5))
             d.text((c * T + 6, 30 + r * (T + 15) + T - 12), f"{label}: {cat}", fill=(255, 255, 160))
     sheet.save(out / "compare.jpg", quality=90)
+    return out / "reference_map.json"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--image", type=Path, required=True)
+    parser.add_argument("--contact-edge", help="x1,y1,x2,y2 of the original LSP's shared edge in image pixels")
+    parser.add_argument("--camera", type=Path, default=ROOT / "work/camera.json")
+    parser.add_argument("--step-a-index", type=Path, default=ROOT / "work/refs/index.json")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--cargo-kind", help="e.g. cargo_wrap, cargo_wooden; default any")
+    parser.add_argument("--cargo-skid", choices=["yes", "no", "any"], default="any")
+    parser.add_argument("--views", type=int, default=3, help="views of the same object per reference image (1-5)")
+    parser.add_argument("--out", type=Path)
+    args = parser.parse_args()
+    cam = json.loads(args.camera.read_text())
+    if args.contact_edge:
+        x1, y1, x2, y2 = map(float, args.contact_edge.split(","))
+    else:
+        x1, y1, x2, y2 = cam["width"] * .4, cam["height"] * .5, cam["width"] * .6, cam["height"] * .5
+    try:
+        path = build_reference_map(args.image, [[x1, y1], [x2, y2]], args.out or CAT / "reference_maps" / args.image.stem,
+                                   camera=args.camera, step_a_index=args.step_a_index, seed=args.seed,
+                                   cargo_kind=args.cargo_kind, cargo_skid=args.cargo_skid, views=args.views,
+                                   edge_given=bool(args.contact_edge))
+    except RuntimeError as error:
+        raise SystemExit(str(error))
+    ref = json.loads(path.read_text())
     print(json.dumps({k: (v.get("variant") or v["path"]) if isinstance(v, dict) and "path" in v else v for k, v in ref.items()}, indent=1))
-    print(f"-> {out / 'reference_map.json'}  (python -m synth.valid_to_violation <image> --reference-map {out / 'reference_map.json'})")
+    print(f"-> {path}  (python -m synth.valid_to_violation <image> --reference-map {path})")
 
 
 if __name__ == "__main__":

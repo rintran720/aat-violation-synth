@@ -1,6 +1,7 @@
 """Turn a valid forklift frame into one reviewed two-LSP violation.
 
-Run: python -m synth.valid_to_violation <valid frame> [--reference-map work/catalogue3d/reference_maps/<stem>/reference_map.json]
+Run: python -m synth.valid_to_violation <valid frame> [--references catalogue|step-a] [--reference-map <map.json>]
+     [--cargo-kind cargo_wrap] [--cargo-skid yes|no|any] [--seed 0]
      [--contact-edge x1,y1,x2,y2] [--camera work/camera.json] [--calibration work/calibration.json]
      [--aesthetic-review] [--measure-only]
 
@@ -24,9 +25,11 @@ nothing is published unless both gates passed.
    projected one: the image model chose that sheet's depth. The cargo's target box is a SKID footprint centred on
    that outline, sized by the LSP's and the SKID's real dimensions (reference map, else calibration and
    DEFAULT_SKID_SIZE_M), raised by the cargo's height.
-References (forklift, LSP, SKID, cargo) are appearance only; by default Step A crops (work/refs/index.json),
-or a --reference-map, e.g. from synth.catalogue_reference_map (view-matched renders of the 3D catalogue). When the
-map gives the cargo's size_m, the cargo's target box is the projection of that 3D box. A failed gate never publishes.
+References (forklift, LSP, SKID, cargo) are appearance only. By default they come from the 3D catalogue
+(work/catalogue3d): once the shared edge is measured, synth.catalogue_reference_map builds the map in the run's work
+folder with the renders whose view matches the camera's view of that edge (no model call), and the map's real
+sizes place the cargo box. --references step-a uses the Step A crops (work/refs/index.json) instead, and
+--reference-map a map built by hand. A failed gate never publishes.
 Every run, accepted or not, also writes <output stem>_summary.png next to the output: the input on the left, the
 output (or the candidate with the fewest failures) on the right, and the run statistics in English below (model
 calls by purpose, attempts per stage, result, last scores and failures).
@@ -339,7 +342,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--measure-only", action="store_true",
                         help="one attempt per stage, no retries: measure, record the comparison, continue")
     parser.add_argument("--step-a-index", type=Path, default=INDEX)
-    parser.add_argument("--reference-map", type=Path, help="Four selected reference images; overrides Step A index")
+    parser.add_argument("--references", choices=("catalogue", "step-a"), default="catalogue",
+                        help="catalogue: build a view-matched map from work/catalogue3d for this frame (default); "
+                             "step-a: the Step A crops")
+    parser.add_argument("--reference-map", type=Path, help="A reference map built by hand; overrides --references")
+    parser.add_argument("--cargo-kind", help="catalogue cargo kind, e.g. cargo_wrap, cargo_wooden; default any")
+    parser.add_argument("--cargo-skid", choices=("yes", "no", "any"), default="any",
+                        help="catalogue cargo with or without a SKID under it")
+    parser.add_argument("--seed", type=int, default=0, help="seed of the catalogue's model choice")
     parser.add_argument("--image-cli", type=Path, default=Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "skills/.system/imagegen/scripts/image_gen.py")
     parser.add_argument("--codex-bin", default="codex")
     return parser.parse_args()
@@ -509,8 +519,9 @@ def main() -> int:
         raise RuntimeError(f"Codex CLI is unavailable: {args.codex_bin}")
     camera_path = getattr(args, "camera", None) or CAMERA
     calibration_path = getattr(args, "calibration", None) or CALIBRATION
-    refs = selected_references(args)
-    ref_name = "catalogue" if getattr(args, "reference_map", None) else "Step A"
+    build_catalogue_map = getattr(args, "references", "step-a") == "catalogue" and not getattr(args, "reference_map", None)
+    if not build_catalogue_map:
+        refs = selected_references(args)
     output = (args.output or ROOT / "work/out" / f"{source.stem}_violation.png").resolve()
     if output.exists():
         raise RuntimeError(f"Output already exists; choose --output: {output}")
@@ -521,7 +532,7 @@ def main() -> int:
     report = {"input": str(source), "input_sha256": sha256(source), "camera": str(camera_path),
               "step_a_index": str(args.step_a_index.resolve()),
               "reference_map": str(args.reference_map.resolve()) if getattr(args, "reference_map", None) else None,
-              "references": {key: str(value) for key, value in refs.items()},
+              "references": {} if build_catalogue_map else {key: str(value) for key, value in refs.items()},
               "editor": args.editor, "aesthetic_review": args.aesthetic_review, "measure_only": args.measure_only,
               "stages": {"sheet": [], "cargo": []}, "accepted": False,
               "calls": {}, "started_at": time.time()}
@@ -550,6 +561,19 @@ def main() -> int:
             edge, anchor_info = source_edge(source_masks, size, gray, lift)
         report["anchor"] = {"contact_edge_px": edge, **anchor_info}
         save_report()
+        if build_catalogue_map:
+            # the catalogue renders whose view matches the camera's view of the shared edge; no model call
+            from synth.catalogue_reference_map import build_reference_map
+            args.reference_map = build_reference_map(
+                source, edge, work / "reference_map", camera=camera_path, step_a_index=args.step_a_index.resolve(),
+                seed=getattr(args, "seed", 0), cargo_kind=getattr(args, "cargo_kind", None),
+                cargo_skid=getattr(args, "cargo_skid", "any"), edge_given=not args.contact_edge)
+            refs = selected_references(args)
+            report["reference_map"] = str(args.reference_map)
+            report["references"] = {key: str(value) for key, value in refs.items()}
+            report["reference_view"] = json.loads(args.reference_map.read_text()).get("view")
+            save_report()
+        ref_name = "catalogue" if getattr(args, "reference_map", None) else "Step A"
         guide = make_geometry_guide(source, edge, work, camera_path=camera_path, calibration_path=calibration_path)
         geometry = json.loads((work / "geometry.json").read_text())
         expected_width, calibrated_depth = (float(v) for v in
