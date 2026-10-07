@@ -8,9 +8,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
-  /* Layout: a workbench. Left, the setup steps in the order they are done (sticky on wide screens);
-     right, the job: one summary strip, then the outputs as they arrive. The accent is the chosen engine's
-     own colour from the engine configuration. */
+  /* Layout: a full-width workbench. Left, the setup steps in the order they are done, then the recent jobs
+     (sticky on wide screens); right, the job: a summary strip with tokens, then one row per input frame with the
+     outputs made from it beside it. The accent is the chosen engine's own colour from the engine configuration. */
   :root {
     --ground: #eef1f4;      /* cool concrete grey, biased slightly blue like the CCTV frames */
     --surface: #ffffff;
@@ -54,19 +54,25 @@
   html, body { margin: 0; }
   [hidden] { display: none !important; }
   body { background: var(--ground); color: var(--ink); font: 400 var(--step-1)/1.5 var(--font-body); }
-  main { max-width: 1360px; margin: 0 auto; padding-inline: 16px; padding-block: 20px 64px; }
+  main { padding-inline: clamp(16px, 2vw, 32px); padding-block: 18px 64px; }
   :focus-visible { outline: 2px solid var(--engine-text); outline-offset: 2px; }
   code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+  .num { font-variant-numeric: tabular-nums; }
 
-  header.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 20px;
-               padding-bottom: 16px; margin-bottom: 20px; border-bottom: 1px solid var(--rule); }
-  header.top h1 { font: 600 var(--step-4)/1.1 var(--font-display); letter-spacing: .01em; margin: 0; text-wrap: balance; }
-  header.top p { margin: 0; color: var(--ink-soft); max-width: 62ch; }
+  header.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 24px;
+               padding-bottom: 14px; margin-bottom: 18px; border-bottom: 1px solid var(--rule); }
+  header.top h1 { font: 600 var(--step-4)/1.1 var(--font-display); letter-spacing: .01em; margin: 0; }
+  .jobpick { display: flex; align-items: center; gap: 8px; font-size: var(--step-0); color: var(--ink-soft); }
+  .jobpick select { width: auto; max-width: 70vw; padding: 6px 8px; font-size: var(--step-0); }
+  header.top p { margin: 0; color: var(--ink-soft); max-width: 80ch; }
 
-  .bench { display: grid; grid-template-columns: minmax(320px, 400px) minmax(0, 1fr); gap: 24px; align-items: start; }
-  @media (max-width: 960px) { .bench { grid-template-columns: minmax(0, 1fr); } }
+  .bench { display: grid; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr); gap: 20px; align-items: start; }
+  @media (max-width: 1000px) { .bench { grid-template-columns: minmax(0, 1fr); } }
   .setup { display: grid; gap: 12px; min-width: 0; }
-  @media (min-width: 961px) { .setup { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); } }
+  @media (min-width: 1001px) {
+    .setup { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px);
+             max-height: calc(100vh - 24px); overflow-y: auto; padding-right: 2px; }
+  }
 
   .step { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 14px 16px 16px; }
   .step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
@@ -123,12 +129,42 @@
          background: var(--warn-soft); color: var(--warn); vertical-align: 1px; }
   .none { color: var(--ink-soft); font-style: italic; margin-top: 12px; }
 
-  .estimate { font-variant-numeric: tabular-nums; color: var(--ink-soft); font-size: var(--step-0); margin: 10px 0 0; }
+  .plan { margin-top: 12px; border: 1px solid var(--rule); border-radius: 7px; padding: 10px 12px; display: grid; gap: 4px;
+          font-size: var(--step-0); font-variant-numeric: tabular-nums; }
+  .plan-row { display: flex; justify-content: space-between; gap: 10px; }
+  .plan-row span:first-child { color: var(--ink-soft); }
+  .plan-row strong { font-weight: 600; }
+  .plan .hint { color: var(--ink-soft); }
   button.go { width: 100%; margin-top: 12px; padding: 11px; border: 0; border-radius: 7px; cursor: pointer;
               background: var(--engine); color: var(--on-engine); font: 600 var(--step-2) var(--font-display); letter-spacing: .02em; }
   button.go:disabled { background: var(--sunken); color: var(--ink-soft); cursor: not-allowed; }
   .problem { margin-top: 10px; padding: 9px 11px; border-radius: 6px; background: var(--bad-soft); color: var(--bad);
              font-size: var(--step-0); white-space: pre-wrap; }
+
+  .codex .step-head { margin-bottom: 8px; }
+  .codex-plan { margin-left: auto; font: 600 11px/1.6 var(--font-body); text-transform: uppercase; letter-spacing: .06em;
+                color: var(--ink-soft); }
+  .usage { height: 8px; border-radius: 99px; background: var(--sunken); overflow: hidden; margin: 6px 0 8px; }
+  .usage span { display: block; height: 100%; background: var(--ok); transition: width .3s ease; }
+  .usage.mid span { background: var(--warn); } .usage.high span { background: var(--bad); }
+  .codex-rows { display: grid; gap: 3px; font-size: var(--step-0); font-variant-numeric: tabular-nums; }
+  .codex-rows div { display: flex; justify-content: space-between; gap: 10px; }
+  .codex-rows span:first-child { color: var(--ink-soft); }
+  .codex-note { font-size: 12px; color: var(--ink-soft); margin-top: 6px; }
+  .codex.blocked { border-color: var(--bad); }
+  .limit { margin-top: 10px; padding: 9px 11px; border-radius: 6px; font-size: var(--step-0); }
+  .limit.over { background: var(--bad-soft); color: var(--bad); }
+  .limit.unknown { background: var(--warn-soft); color: var(--warn); }
+  button.force { width: 100%; margin-top: 8px; padding: 8px; border-radius: 7px; cursor: pointer; background: var(--surface);
+                 color: var(--bad); border: 1px solid var(--bad); font: 600 var(--step-0) var(--font-body); }
+  .history { display: grid; gap: 6px; }
+  .history a { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 8px 10px; border-radius: 7px;
+               border: 1px solid var(--rule); color: var(--ink); text-decoration: none; font-size: var(--step-0); }
+  .history a:hover { border-color: var(--engine-text); }
+  .history a[aria-current="true"] { border-color: var(--engine-text); background: color-mix(in oklab, var(--engine) 7%, var(--surface)); }
+  .history .h-id { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+  .history .h-meta { color: var(--ink-soft); grid-column: 1 / -1; font-variant-numeric: tabular-nums; }
+  .history .h-state { font-variant-numeric: tabular-nums; color: var(--ink-soft); }
 
   .run { display: grid; gap: 14px; min-width: 0; }
   .summary { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 14px 16px; }
@@ -143,10 +179,22 @@
   .meter { height: 6px; border-radius: 99px; background: var(--sunken); overflow: hidden; display: flex; margin: 12px 0 10px; }
   .meter span { height: 100%; transition: width .3s ease; }
   .meter .m-done { background: var(--ok); } .meter .m-failed { background: var(--bad); } .meter .m-running { background: var(--run); }
+  .summary-row { display: flex; flex-wrap: wrap; gap: 10px 24px; justify-content: space-between; align-items: center; }
+  .summary-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button.resume { background: var(--engine); border: 1px solid var(--engine); color: var(--on-engine);
+                  padding: 8px 14px; font-size: var(--step-1); }
+  button.resume:hover { color: var(--on-engine); filter: brightness(1.08); }
+  button.resume:disabled { opacity: .5; cursor: not-allowed; }
+  .resume-failed { font-size: var(--step-0); color: var(--ink-soft); display: inline-flex; gap: 5px; align-items: center; }
+  .resume-msg { margin-top: 10px; padding: 8px 11px; border-radius: 6px; font-size: var(--step-0);
+                background: var(--bad-soft); color: var(--bad); }
   .tally { display: flex; flex-wrap: wrap; gap: 6px; }
   .filter { border: 1px solid var(--rule); background: var(--surface); color: var(--ink); border-radius: 99px; padding: 3px 11px;
             font: 500 var(--step-0) var(--font-body); cursor: pointer; font-variant-numeric: tabular-nums; }
   .filter[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+  .tokens { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: var(--step-0); font-variant-numeric: tabular-nums; }
+  .tokens span { color: var(--ink-soft); }
+  .tokens b { color: var(--ink); font-weight: 600; }
   .notes { margin: 10px 0 0; padding: 8px 12px 8px 28px; border-radius: 6px; background: var(--warn-soft); color: var(--warn);
            font-size: var(--step-0); }
   a.btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; border-radius: 6px; text-decoration: none;
@@ -154,32 +202,68 @@
   a.btn.primary { background: var(--engine); border-color: var(--engine); color: var(--on-engine); }
   a.btn[aria-disabled="true"] { pointer-events: none; background: var(--sunken); border-color: var(--rule); color: var(--ink-soft); }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
-  .card { background: var(--surface); border: 1px solid var(--rule); border-top: 3px solid var(--wait); border-radius: var(--radius);
-          overflow: hidden; display: grid; grid-template-rows: auto 1fr auto; min-width: 0; }
-  .card.running { border-top-color: var(--run); } .card.done { border-top-color: var(--ok); } .card.failed { border-top-color: var(--bad); }
+  /* one row per input frame: the frame in the first column, the outputs made from it in the second */
+  .pairs { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); overflow: hidden; }
+  .pairs-head, .pair { display: grid; grid-template-columns: minmax(220px, 22%) minmax(0, 1fr); }
+  .pairs-head { background: var(--sunken); font: 600 11px/1 var(--font-body); text-transform: uppercase; letter-spacing: .06em;
+                color: var(--ink-soft); }
+  .pairs-head div { padding: 9px 14px; }
+  .pair { border-top: 1px solid var(--rule); }
+  .pair-input { padding: 12px 14px; border-right: 1px solid var(--rule); display: grid; gap: 6px; align-content: start; min-width: 0; }
+  .pair-outputs { padding: 12px 14px; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px;
+                  align-content: start; min-width: 0; }
+  @media (max-width: 700px) {
+    .pairs-head { display: none; }
+    .pairs-head, .pair { grid-template-columns: minmax(0, 1fr); }
+    .pair-input { border-right: 0; border-bottom: 1px dashed var(--rule); }
+  }
+  .frame { aspect-ratio: 16 / 9; max-width: 100%; border-radius: 6px; overflow: hidden; background: var(--sunken); }
+  .frame img { width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in; }
+  .in-name { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+  .in-kind { font-size: var(--step-0); color: var(--ink-soft); }
+  .in-count { font-size: var(--step-0); font-variant-numeric: tabular-nums; color: var(--ink-soft); }
+  .pairs-empty { padding: 24px 14px; color: var(--ink-soft); }
+
+  .card { border: 1px solid var(--rule); border-top: 3px solid var(--wait); border-radius: 7px; overflow: hidden;
+          display: grid; grid-template-rows: auto 1fr auto; min-width: 0; background: var(--surface); }
+  .card.running { border-top-color: var(--run); } .card.done { border-top-color: var(--ok); }
+  .card.failed, .card.interrupted { border-top-color: var(--bad); }
   .shot { aspect-ratio: 16 / 9; max-width: 100%; background: var(--sunken); display: grid; place-items: center;
           color: var(--ink-soft); font-size: var(--step-0); }
   .shot img { width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in; }
-  .card-body { padding: 10px 12px 4px; display: grid; gap: 2px; min-width: 0; }
+  .card-body { padding: 8px 10px 2px; display: grid; gap: 2px; min-width: 0; }
   .card-title { font-weight: 600; }
   .card-title .mono { color: var(--ink-soft); font-weight: 400; }
-  .card-file { font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft); overflow-wrap: anywhere; }
-  .card-error { color: var(--bad); font-size: var(--step-0); overflow-wrap: anywhere; margin-top: 4px; }
-  .card-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 12px 12px; }
+  .card-error { color: var(--bad); font-size: var(--step-0); overflow-wrap: anywhere; }
+  .card-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 10px 10px; flex-wrap: wrap; }
   .chip { font: 600 11px/1.7 var(--font-body); padding: 0 8px; border-radius: 99px; text-transform: uppercase; letter-spacing: .05em;
           font-variant-numeric: tabular-nums; background: var(--wait-soft); color: var(--wait); }
   .chip.running { background: var(--run-soft); color: var(--run); } .chip.done { background: var(--ok-soft); color: var(--ok); }
-  .chip.failed { background: var(--bad-soft); color: var(--bad); }
+  .chip.failed, .chip.interrupted { background: var(--bad-soft); color: var(--bad); }
+  .rebuild-note { font-size: 12px; color: var(--ink-soft); overflow-wrap: anywhere; }
+  .rebuild-note b { color: var(--engine-text); font-weight: 600; }
+  button.btn-quiet { border: 1px solid var(--rule); background: var(--surface); color: var(--ink); border-radius: 6px;
+                     padding: 6px 10px; font: 600 var(--step-0) var(--font-body); cursor: pointer; }
+  button.btn-quiet:hover { border-color: var(--engine-text); color: var(--engine-text); }
+  .rebuild-form { display: grid; gap: 6px; padding: 0 10px 10px; }
+  .rebuild-form textarea { width: 100%; min-height: 70px; resize: vertical; padding: 7px 9px; font: inherit;
+                           font-size: var(--step-0); color: var(--ink); background: var(--ground);
+                           border: 1px solid var(--rule); border-radius: 6px; }
+  .rebuild-form .row { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+  .rebuild-form .err { color: var(--bad); font-size: 12px; }
+  .rebuild-form button.go-small { border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+                                  background: var(--engine); color: var(--on-engine); font: 600 var(--step-0) var(--font-body); }
+  .tok { font-size: 12px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
   .spin { width: 22px; height: 22px; border-radius: 50%; border: 3px solid var(--rule); border-top-color: var(--run);
           animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .spin { animation: none; } .meter span { transition: none; } }
 
   .start { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 18px 20px;
-           display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+           display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
+  @media (max-width: 1100px) { .start { grid-template-columns: minmax(0, 1fr); } }
   .start h2 { margin: 0 0 8px; font: 600 var(--step-3)/1.2 var(--font-display); }
-  .start p { margin: 0 0 10px; color: var(--ink-soft); max-width: 60ch; }
+  .start p { margin: 0 0 10px; color: var(--ink-soft); max-width: 64ch; }
   .tree-wrap { overflow-x: auto; min-width: 0; }
   pre.tree { margin: 0; padding: 12px 14px; background: var(--ground); border: 1px solid var(--rule); border-radius: 7px;
              font: 400 12.5px/1.7 var(--font-mono); color: var(--ink); }
@@ -190,7 +274,8 @@
   dialog::backdrop { background: rgba(8, 12, 18, .82); }
   .viewer { display: grid; gap: 8px; justify-items: end; }
   .viewer img { max-width: 96vw; max-height: 84vh; display: block; border-radius: 6px; }
-  .viewer-bar { display: flex; gap: 8px; }
+  .viewer-bar { display: flex; gap: 8px; align-items: center; }
+  .viewer-bar .cap { color: #e5e9ef; font-size: var(--step-0); margin-right: auto; }
   .viewer-bar button { border: 1px solid var(--rule); background: var(--surface); color: var(--ink); border-radius: 6px;
                        padding: 7px 12px; font: 600 var(--step-0) var(--font-body); cursor: pointer; }
 </style>
@@ -199,66 +284,82 @@
 <main>
   <header class="top">
     <h1>Violation Generator</h1>
+    <div class="jobpick"><label for="jobPick">Open a job</label>
+      <select id="jobPick"><option value="">New job…</option></select></div>
     <p>Turns valid CCTV frames into violation images. Each output is one Astra edit; three run at a time and each
-      appears here as soon as it is ready.</p>
+      appears beside its input frame as soon as it is ready.</p>
   </header>
 
   <div class="bench">
-    <form id="form" class="setup" autocomplete="off" novalidate>
-      <section class="step" id="stepInput">
-        <div class="step-head"><span class="step-no">1</span><h2>Input frames</h2></div>
-        <div class="seg" role="tablist" aria-label="How to give the input">
-          <button type="button" role="tab" id="tabFolder" data-mode="folder" aria-selected="true">Folder path</button>
-          <button type="button" role="tab" id="tabUpload" data-mode="upload" aria-selected="false">Upload by kind</button>
-          <button type="button" role="tab" id="tabZip" data-mode="zip" aria-selected="false">Zip file</button>
-        </div>
-        <div data-pane="folder">
-          <label class="field" for="folder">Folder on the server</label>
-          <input id="folder" type="text" placeholder="work/inputs/cam01" spellcheck="false">
-          <div class="help">Absolute, or relative to the repository. It must contain the input-kind folders listed below.</div>
-        </div>
-        <div data-pane="upload" hidden>
-          <div class="kinds" id="kindUploads"></div>
-        </div>
-        <div data-pane="zip" hidden>
-          <div class="drop" id="zipDrop" tabindex="0" role="button"><strong>Drop a .zip</strong> or click to choose
-            <input id="zipFile" type="file" accept=".zip" hidden></div>
-          <div class="help" id="zipName">The zip holds the input-kind folders, at its top or inside one folder.</div>
-        </div>
-        <table class="map" aria-label="Input kinds">
-          <thead><tr><th>Folder name</th><th>Feeds engine</th></tr></thead>
-          <tbody id="kindMap"></tbody>
-        </table>
+    <aside class="setup">
+      <section class="step codex" id="codexCard" aria-live="polite">
+        <div class="step-head"><h2>Codex Astra 6</h2><span class="codex-plan" id="codexPlan"></span></div>
+        <div id="codexBody" class="codex-note">Reading the plan's usage limit…</div>
       </section>
+      <form id="form" class="setup" autocomplete="off" novalidate style="position:static;max-height:none;overflow:visible">
+        <section class="step" id="stepInput">
+          <div class="step-head"><span class="step-no">1</span><h2>Input frames</h2></div>
+          <div class="seg" role="tablist" aria-label="How to give the input">
+            <button type="button" role="tab" id="tabFolder" data-mode="folder" aria-selected="true">Folder path</button>
+            <button type="button" role="tab" id="tabUpload" data-mode="upload" aria-selected="false">Upload by kind</button>
+            <button type="button" role="tab" id="tabZip" data-mode="zip" aria-selected="false">Zip file</button>
+          </div>
+          <div data-pane="folder">
+            <label class="field" for="folder">Folder on the server</label>
+            <input id="folder" type="text" placeholder="work/inputs/cam01" spellcheck="false">
+            <div class="help">Absolute, or relative to the repository. It must contain the input-kind folders listed below.</div>
+          </div>
+          <div data-pane="upload" hidden>
+            <div class="kinds" id="kindUploads"></div>
+          </div>
+          <div data-pane="zip" hidden>
+            <div class="drop" id="zipDrop" tabindex="0" role="button"><strong>Drop a .zip</strong> or click to choose
+              <input id="zipFile" type="file" accept=".zip" hidden></div>
+            <div class="help" id="zipName">The zip holds the input-kind folders, at its top or inside one folder.</div>
+          </div>
+          <table class="map" aria-label="Input kinds">
+            <thead><tr><th>Folder name</th><th>Feeds engine</th></tr></thead>
+            <tbody id="kindMap"></tbody>
+          </table>
+        </section>
 
-      <section class="step" id="stepEngine">
-        <div class="step-head"><span class="step-no">2</span><h2>Engine and violation cases</h2></div>
-        <label class="field" for="engine">Engine</label>
-        <select id="engine"></select>
-        <div id="cases" class="cases"></div>
+        <section class="step" id="stepEngine">
+          <div class="step-head"><span class="step-no">2</span><h2>Engine and violation cases</h2></div>
+          <label class="field" for="engine">Engine</label>
+          <select id="engine"></select>
+          <div id="cases" class="cases"></div>
+        </section>
+
+        <section class="step" id="stepGo">
+          <div class="step-head"><span class="step-no">3</span><h2>Variants and generate</h2></div>
+          <label class="field" for="variants">Outputs per frame and case</label>
+          <input id="variants" type="number" min="1" max="10" value="1">
+          <div class="help">Each variant is its own Astra edit with other catalogue LSP / SKID references.</div>
+          <div class="plan" id="plan" aria-live="polite"></div>
+          <div class="limit" id="limit" hidden></div>
+          <button id="go" class="go" type="submit">Generate</button>
+          <button id="force" class="force" type="button" hidden>Run anyway, over the usage limit</button>
+          <div id="problem" class="problem" hidden></div>
+        </section>
+      </form>
+
+      <section class="step" id="stepHistory">
+        <div class="step-head"><h2>Recent jobs</h2></div>
+        <div class="history" id="history"><div class="help">No jobs yet.</div></div>
       </section>
+    </aside>
 
-      <section class="step" id="stepGo">
-        <div class="step-head"><span class="step-no">3</span><h2>Variants and generate</h2></div>
-        <label class="field" for="variants">Outputs per frame and case</label>
-        <input id="variants" type="number" min="1" max="10" value="1">
-        <div class="help">Each variant is its own Astra edit with other catalogue LSP / SKID references.</div>
-        <p class="estimate" id="estimate"></p>
-        <button id="go" class="go" type="submit">Generate</button>
-        <div id="problem" class="problem" hidden></div>
-      </section>
-    </form>
-
-    <section class="run" aria-live="polite">
+    <section class="run">
       <div class="start" id="start">
         <div>
           <h2>How inputs are sorted</h2>
           <p>Put each frame in the folder of what it shows. A job uses only the folders of the engine you choose, and
-            every case says which kinds it can turn into a violation.</p>
+            every case says which kinds it can turn into a violation. Results show each input frame with the outputs
+            made from it.</p>
           <ol class="how">
             <li>Give the frames: a folder path, a zip, or uploads per kind.</li>
-            <li>Choose the engine and its violation cases.</li>
-            <li>Set the variants and generate. Outputs arrive here one by one.</li>
+            <li>Choose the engine and its violation cases; check the outputs and tokens it will take.</li>
+            <li>Set the variants and generate. Outputs arrive beside their input one by one.</li>
           </ol>
         </div>
         <div class="tree-wrap">
@@ -278,13 +379,24 @@
             <h2 id="jobTitle"></h2>
             <div class="sub"><span id="jobMeta"></span> · <span class="live" id="live"></span></div>
           </div>
-          <a id="zipAll" class="btn primary" href="#" aria-disabled="true">Download all</a>
+          <div class="summary-actions">
+            <button type="button" id="resumeBtn" class="btn-quiet resume" hidden>Resume</button>
+            <label class="resume-failed" id="resumeFailedWrap" hidden><input type="checkbox" id="resumeFailed"> also retry failed</label>
+            <a id="zipAll" class="btn primary" href="#" aria-disabled="true">Download all</a>
+          </div>
         </div>
         <div class="meter" aria-hidden="true"><span class="m-done"></span><span class="m-failed"></span><span class="m-running"></span></div>
-        <div class="tally" id="tally" role="group" aria-label="Show outputs"></div>
+        <div class="summary-row">
+          <div class="tally" id="tally" role="group" aria-label="Show outputs"></div>
+          <div class="tokens" id="tokens"></div>
+        </div>
         <ul class="notes" id="notes" hidden></ul>
+        <div class="resume-msg" id="resumeMsg" hidden></div>
       </div>
-      <div class="grid" id="grid"></div>
+      <div class="pairs" id="pairs" hidden>
+        <div class="pairs-head"><div>Input frame</div><div>Outputs made from it</div></div>
+        <div id="pairRows"></div>
+      </div>
     </section>
   </div>
 </main>
@@ -292,7 +404,8 @@
 <dialog id="viewer">
   <div class="viewer">
     <img alt="">
-    <div class="viewer-bar"><a class="btn primary" id="viewerDownload" href="#" download>Download</a>
+    <div class="viewer-bar"><span class="cap" id="viewerCap"></span>
+      <a class="btn primary" id="viewerDownload" href="#" download>Download</a>
       <button type="button" id="viewerClose">Close</button></div>
   </div>
 </dialog>
@@ -300,16 +413,80 @@
 <script>
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const STATUS = ["done", "running", "queued", "failed"];
-const LABEL = { done: "Done", running: "Running", queued: "Waiting", failed: "Failed" };
-let kinds = [], engines = [], mode = "folder", uploads = {}, zipFile = null;
-let job = null, socket = null, closedByUs = false, filter = "all";
+const STATUS = ["done", "running", "queued", "failed", "interrupted"];
+const LABEL = { done: "Done", running: "Running", queued: "Waiting", failed: "Failed", interrupted: "Interrupted" };
+const fmt = (n) => (n ?? 0).toLocaleString("en-US");
+const kTok = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
+const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
+let kinds = [], engines = [], perOutput = null, mode = "folder", uploads = {}, zipFile = null;
+let job = null, socket = null, closedByUs = false, filter = "all", checkTimer = null, checkSeq = 0;
+let codex = null, fit = null, plannedOutputs = null;
+
+// ---------- Codex plan usage ----------
+async function loadCodex(force = false) {
+  try {
+    codex = await (await fetch(`/api/codex${force ? "?refresh=true" : ""}`)).json();
+  } catch (_) { codex = null; }
+  renderCodex();
+  // re-judge the planned job against the new reading; no new dry run (a zip would be uploaded again)
+  if (plannedOutputs) { showFit(fitFor(plannedOutputs)); refreshButton(); }
+}
+function refreshButton() {
+  const ready = !!engine() && chosen().length > 0 && !!plannedOutputs;
+  $("#go").disabled = !ready || !!(fit && !fit.fits);
+}
+function renderCodex() {
+  const card = $("#codexCard"), body = $("#codexBody");
+  const r = codex && codex.reading;
+  card.classList.toggle("blocked", !!(codex && codex.blocked));
+  $("#codexPlan").textContent = r && r.plan ? `${r.plan} plan` : "";
+  if (!r) {
+    body.className = "codex-note";
+    body.textContent = codex && codex.error ? `The usage limit could not be read: ${codex.error}` : "The usage limit could not be read.";
+    return;
+  }
+  const used = r.used_percent ?? 0, level = used >= 85 ? "high" : used >= 60 ? "mid" : "";
+  const window = r.window_minutes >= 10080 ? "weekly" : r.window_minutes >= 1440 ? "daily" : `${Math.round(r.window_minutes / 60)} h`;
+  const resets = r.resets_at ? new Date(r.resets_at * 1000).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "–";
+  const c = codex.calibration;
+  const left = codex.blocked ? "none, the limit is reached"
+    : codex.outputs_left !== null ? `about ${fmt(codex.outputs_left)}`
+    : "not known yet";
+  body.className = "";
+  body.innerHTML = `<div class="usage ${level}" role="img" aria-label="${used}% of the ${window} limit used"><span style="width:${Math.min(100, used)}%"></span></div>
+    <div class="codex-rows">
+      <div><span>Used of the ${window} limit</span><strong>${used}%</strong></div>
+      <div><span>Resets</span><strong>${esc(resets)}</strong></div>
+      <div><span>Outputs it still has room for</span><strong>${left}</strong></div>
+      ${codex.pending_outputs ? `<div><span>Already queued</span><strong>${plural(codex.pending_outputs, "output")}</strong></div>` : ""}
+    </div>
+    <div class="codex-note">${c.calibrated
+      ? `About ${c.percent_per_output.toFixed(2)}% of the limit per output, measured over ${plural(c.outputs_seen, "output")}.`
+      : `The room in outputs is measured from finished jobs (${plural(c.outputs_seen, "output")} so far).`}</div>`;
+}
+// whether a job of n outputs fits in what the plan has left; null room = unknown, which does not block
+function fitFor(n) {
+  if (!codex || !codex.reading) return { fits: true, reason: "The Codex usage limit could not be read." };
+  if (codex.blocked) return { fits: false, reason: "Codex reports the plan's usage limit is reached; no edit can run until it resets." };
+  if (codex.outputs_left === null) return { fits: true, reason: "The room left is not known yet: it is calibrated from finished outputs." };
+  if (n > codex.outputs_left) return { fits: false, reason: `This job makes ${fmt(n)} outputs, but the Codex plan has room for about ${fmt(codex.outputs_left)} more (after the outputs already queued) before its limit resets.` };
+  return { fits: true, reason: null };
+}
+function showFit(f) {
+  fit = f;
+  const box = $("#limit"), over = f && !f.fits;
+  box.hidden = !(f && f.reason);
+  box.className = `limit ${over ? "over" : "unknown"}`;
+  box.textContent = f && f.reason ? f.reason : "";
+  $("#force").hidden = !over;
+  if (over) $("#go").disabled = true;
+}
+$("#force").addEventListener("click", () => submitJob(true));
 
 // ---------- setup ----------
 function engine() { return engines.find((e) => e.id === $("#engine").value); }
 function engineName(id) { return (engines.find((e) => e.id === id) || {}).name || id; }
 function kindEngine(kind) { return kinds.find((k) => k.id === kind)?.engine; }
-const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 document.querySelectorAll(".seg button").forEach((b) => b.addEventListener("click", () => {
   mode = b.dataset.mode;
@@ -395,9 +572,32 @@ $("#variants").addEventListener("input", refresh);
 $("#folder").addEventListener("input", refresh);
 function chosen() { return [...document.querySelectorAll("input[name=case]:checked")].map((i) => i.value); }
 
+function formData(dryRun) {
+  const data = new FormData();
+  data.append("engine", $("#engine").value);
+  chosen().forEach((c) => data.append("cases", c));
+  data.append("variants", $("#variants").value);
+  if (dryRun) data.append("dry_run", "1");
+  if (mode === "upload") {
+    for (const [kind, files] of Object.entries(uploads))
+      if (kindEngine(kind) === engine()?.id) files.forEach((f) => data.append(`files:${kind}`, f, f.name));
+  } else if (mode === "zip") data.append("zip", zipFile, zipFile.name);
+  else data.append("folder", $("#folder").value.trim());
+  return data;
+}
+
+function planRows(frames, outputs, tokens, extra = "") {
+  const rows = [];
+  if (frames !== null) rows.push(["Frames used", fmt(frames)]);
+  rows.push(["Outputs (Astra edits)", outputs === null ? "–" : fmt(outputs)]);
+  if (tokens) rows.push(["Estimated tokens", `~${kTok(tokens.median)} (${kTok(tokens.low)}–${kTok(tokens.high)})`]);
+  $("#plan").innerHTML = rows.map(([a, b]) => `<div class="plan-row"><span>${a}</span><strong>${b}</strong></div>`).join("")
+    + `<div class="hint">${perOutput ? `About ${kTok(perOutput.median)} tokens per output (${perOutput.samples} ${perOutput.basis}); the Codex count for the Astra session, imagegen's own cost not included.` : ""}${extra}</div>`;
+}
+
 function refresh() {
   const e = engine(), cases = chosen(), variants = Math.min(10, Math.max(1, +$("#variants").value || 1));
-  let inputReady, outputs = null, text;
+  let inputReady, outputs = null;
   if (mode === "upload") {
     let frames = 0;
     outputs = 0;
@@ -407,49 +607,124 @@ function refresh() {
       frames += files.length; outputs += files.length * n * variants;
     }
     inputReady = frames > 0;
-    text = frames ? `${plural(frames, "frame")} → ${plural(outputs, "output")}` : "Add images to a kind this engine uses.";
+    planRows(frames, outputs, outputs && perOutput ? { median: outputs * perOutput.median, low: outputs * perOutput.low, high: outputs * perOutput.high } : null,
+             frames ? "" : " Add images to a kind this engine uses.");
+    plannedOutputs = outputs || null;
+    showFit(outputs ? fitFor(outputs) : null);
   } else {
     inputReady = mode === "zip" ? !!zipFile : !!$("#folder").value.trim();
-    text = `${plural(cases.length, "case")} × ${plural(variants, "variant")} for each frame in `
-      + (e ? e.input_kinds.join(" and ") : "-");
+    planRows(null, null, null, inputReady ? " Checking the input…" : " Give a folder or a zip to see how many outputs it makes.");
+    plannedOutputs = null;
+    showFit(null);
+    clearTimeout(checkTimer);
+    if (inputReady && e && cases.length) checkTimer = setTimeout(checkInput, 500);
   }
   const ready = !!e && cases.length > 0 && inputReady && outputs !== 0;
-  $("#estimate").textContent = text;
   $("#go").textContent = outputs ? `Generate ${plural(outputs, "output")}` : "Generate";
-  $("#go").disabled = !ready;
+  $("#go").disabled = !ready || !!(fit && !fit.fits);
   $("#stepInput").classList.toggle("ready", inputReady);
   $("#stepEngine").classList.toggle("ready", cases.length > 0);
   $("#stepGo").classList.toggle("ready", ready);
 }
 
-$("#form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
+// counts the frames and outputs of a folder or zip on the server without starting anything
+async function checkInput() {
+  const seq = ++checkSeq;
+  try {
+    const res = await fetch("/api/jobs", { method: "POST", body: formData(true) });
+    const body = await res.json().catch(() => ({}));
+    if (seq !== checkSeq) return;
+    if (!res.ok) { planRows(null, null, null, ` ${esc(detail(body) || "The input could not be read.")}`); $("#go").disabled = true; return; }
+    const frames = Object.values(body.frames).reduce((a, b) => a + b, 0);
+    planRows(frames, body.outputs, body.tokens, body.notes.length ? ` ${body.notes.map(esc).join(" · ")}` : "");
+    $("#go").textContent = `Generate ${plural(body.outputs, "output")}`;
+    plannedOutputs = body.outputs;
+    if (body.codex) { codex = body.codex.status; renderCodex(); }
+    showFit(body.codex ? { fits: body.codex.fits, reason: body.codex.reason } : fitFor(body.outputs));
+    $("#go").disabled = !!(fit && !fit.fits);
+  } catch (err) {
+    if (seq === checkSeq) planRows(null, null, null, " The service did not answer.");
+  }
+}
+
+function detail(body) { const d = body && body.detail; return d && typeof d === "object" ? d.message : d; }
+$("#form").addEventListener("submit", (ev) => { ev.preventDefault(); submitJob(false); });
+async function submitJob(force) {
   const problem = $("#problem"); problem.hidden = true;
-  const data = new FormData();
-  data.append("engine", $("#engine").value);
-  chosen().forEach((c) => data.append("cases", c));
-  data.append("variants", $("#variants").value);
-  if (mode === "upload") {
-    for (const [kind, files] of Object.entries(uploads))
-      if (kindEngine(kind) === engine()?.id) files.forEach((f) => data.append(`files:${kind}`, f, f.name));
-  } else if (mode === "zip") data.append("zip", zipFile, zipFile.name);
-  else data.append("folder", $("#folder").value.trim());
   const go = $("#go"); go.disabled = true; go.textContent = "Starting…";
   try {
+    const data = formData(false);
+    if (force) data.append("force", "1");
     const res = await fetch("/api/jobs", { method: "POST", body: data });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.detail || `The service answered ${res.status}.`);
+    if (res.status === 409 && body.detail && body.detail.codex) {
+      codex = body.detail.codex.status; renderCodex();
+      showFit({ fits: false, reason: body.detail.message });
+      return;
+    }
+    if (!res.ok) throw new Error(detail(body) || `The service answered ${res.status}.`);
     openJob(body);
+    loadHistory();
+    loadCodex();
   } catch (err) {
     problem.textContent = String(err.message || err); problem.hidden = false;
-  } finally { refresh(); }
+  } finally {
+    const kept = fit && !fit.fits ? fit : null;
+    if (kept) { showFit(kept); $("#go").textContent = "Generate"; } else refresh();
+  }
+}
+
+// ---------- history ----------
+async function loadHistory() {
+  try {
+    const list = await (await fetch("/api/jobs")).json();
+    const pick = $("#jobPick");
+    pick.innerHTML = `<option value="">New job…</option>` + list.map((j) => {
+      const state = j.finished ? `${fmt(j.counts.done)}/${fmt(j.total)} done` : `running ${fmt(j.counts.done + j.counts.failed)}/${fmt(j.total)}`;
+      return `<option value="${esc(j.id)}">${esc(j.id)} · ${esc(j.engine_name)} · ${state}</option>`;
+    }).join("");
+    pick.value = job ? job.id : "";
+    $("#history").innerHTML = list.length ? list.slice(0, 20).map((j) => {
+      const when = new Date(j.created * 1000).toLocaleString();
+      const state = j.finished ? `${fmt(j.counts.done)}/${fmt(j.total)} done` : `${fmt(j.counts.done + j.counts.failed)}/${fmt(j.total)} made`;
+      return `<a href="#job=${esc(j.id)}" data-job="${esc(j.id)}" aria-current="${job && job.id === j.id}">
+        <span class="h-id">${esc(j.id)}</span><span class="h-state">${state}</span>
+        <span class="h-meta">${esc(j.engine_name)} · ${plural(j.inputs, "frame")} · ${kTok(j.tokens_used)} tokens · ${esc(when)}</span></a>`;
+    }).join("") : `<div class="help">No jobs yet.</div>`;
+    document.querySelectorAll("#history a").forEach((a) => a.addEventListener("click", async (e) => {
+      e.preventDefault();
+      openJobById(a.dataset.job);
+    }));
+  } catch (_) {}
+}
+
+// open a job from the picker, a history link, or a #job=<id> typed in the address bar / reached with Back
+async function openJobById(id) {
+  if (!id) { closeJob(); return; }
+  if (job && job.id === id) return;
+  const res = await fetch(`/api/jobs/${id}`);
+  if (res.ok) { openJob(await res.json()); loadHistory(); }
+  else { $("#problem").textContent = `No job ${id} on this service.`; $("#problem").hidden = false; }
+}
+function closeJob() {
+  if (socket) { closedByUs = true; socket.close(); socket = null; }
+  job = null;
+  try { history.replaceState(null, "", location.pathname); } catch (_) {}
+  $("#start").hidden = false; $("#summary").hidden = true; $("#pairs").hidden = true;
+  loadHistory();
+}
+$("#jobPick").addEventListener("change", (e) => openJobById(e.target.value));
+window.addEventListener("hashchange", () => {
+  const m = location.hash.match(/job=([\w-]+)/);
+  openJobById(m ? m[1] : "");
 });
 
 // ---------- job ----------
 function openJob(state) {
   job = state; filter = "all";
-  try { history.replaceState(null, "", `#job=${job.id}`); } catch (_) {}
-  $("#start").hidden = true; $("#summary").hidden = false;
+  try { if (location.hash !== `#job=${job.id}`) history.pushState(null, "", `#job=${job.id}`); } catch (_) {}
+  const pick = $("#jobPick"); if (pick) pick.value = job.id;
+  $("#start").hidden = true; $("#summary").hidden = false; $("#pairs").hidden = false;
   renderJob(); connect();
 }
 function connect() {
@@ -457,12 +732,13 @@ function connect() {
   closedByUs = false;
   const id = job.id;
   socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/jobs/${id}`);
-  socket.onopen = () => live("Live", "on");
+  socket.onopen = () => live(job.finished ? "Finished" : "Live", job.finished ? "" : "on");
   socket.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
     if (!job || job.id !== id) return;
-    if (msg.type === "job") { job = msg.job; renderJob(); }
+    if (msg.type === "job") { job = msg.job; renderJob(); if (job.finished) loadCodex(true); }
     else if (msg.type === "task") updateTask(msg.task);
+    else if (msg.type === "tokens") { job.tokens = msg.tokens; renderTokens(); }
     else if (msg.type === "error") live(msg.error, "lost");
   };
   socket.onclose = () => {
@@ -474,69 +750,177 @@ function connect() {
 }
 function live(text, state) { const el = $("#live"); el.textContent = text; el.className = `live ${state}`; }
 
+function counts() {
+  const c = Object.fromEntries(STATUS.map((s) => [s, 0]));
+  job.tasks.forEach((t) => c[t.status]++);
+  return c;
+}
 function updateTask(task) {
   const i = job.tasks.findIndex((t) => t.id === task.id);
   if (i < 0) return;
   job.tasks[i] = task;
-  const c = { queued: 0, running: 0, done: 0, failed: 0 };
-  job.tasks.forEach((t) => c[t.status]++);
-  job.counts = c; job.finished = !c.queued && !c.running;
+  job.counts = counts(); job.finished = !job.counts.queued && !job.counts.running;
   renderSummary();
   const old = document.getElementById(`card-${task.id}`);
   if (old) old.replaceWith(card(task));
+  const head = document.querySelector(`[data-input-count="${CSS.escape(task.input_kind + "/" + task.input)}"]`);
+  if (head) head.textContent = inputCount(task.input_kind, task.input);
   applyFilter();
 }
 function renderJob() {
   renderSummary();
-  const grid = $("#grid"); grid.innerHTML = "";
-  job.tasks.forEach((t) => grid.appendChild(card(t)));
+  const rows = $("#pairRows");
+  rows.innerHTML = "";
+  if (!job.inputs.length) rows.innerHTML = `<div class="pairs-empty">This job has no inputs.</div>`;
+  for (const input of job.inputs) {
+    const row = document.createElement("div");
+    row.className = "pair"; row.dataset.input = `${input.kind}/${input.name}`;
+    row.innerHTML = `<div class="pair-input">
+        <div class="frame"><img src="${esc(input.thumb)}" alt="Input ${esc(input.name)}" loading="lazy"></div>
+        <div class="in-name">${esc(input.name)}</div>
+        <div class="in-kind"><code>${esc(input.kind)}</code></div>
+        <div class="in-count" data-input-count="${esc(input.kind + "/" + input.name)}">${inputCount(input.kind, input.name)}</div>
+      </div><div class="pair-outputs"></div>`;
+    row.querySelector(".frame img").addEventListener("click", () => view(input.url, `Input · ${input.kind}/${input.name}`, input.name));
+    const outs = row.querySelector(".pair-outputs");
+    job.tasks.filter((t) => t.input_kind === input.kind && t.input === input.name).forEach((t) => outs.appendChild(card(t)));
+    rows.appendChild(row);
+  }
   applyFilter();
+}
+function inputCount(kind, name) {
+  const tasks = job.tasks.filter((t) => t.input_kind === kind && t.input === name);
+  return `${tasks.filter((t) => t.status === "done").length} of ${plural(tasks.length, "output")} ready`;
+}
+function renderTokens() {
+  const t = job.tokens || {};
+  const parts = [`<span>Tokens used <b>${fmt(t.used)}</b></span>`];
+  if (t.outputs_counted) parts.push(`<span>Per output <b>${fmt(Math.round(t.used / t.outputs_counted))}</b></span>`);
+  if (!job.finished && t.estimate_left) parts.push(`<span>Still to use <b>~${kTok(t.estimate_left.median)}</b></span>`);
+  if (t.estimate_total) parts.push(`<span title="${fmt(job.total)} outputs × the median tokens per output recorded so far">Estimate for ${fmt(job.total)} outputs <b>~${kTok(t.estimate_total.median)}</b></span>`);
+  $("#tokens").innerHTML = parts.join("");
 }
 function renderSummary() {
   const c = job.counts, total = job.total, e = engines.find((x) => x.id === job.engine);
   if (e) document.documentElement.style.setProperty("--engine", e.color);
-  $("#jobTitle").textContent = job.finished ? `${c.done} of ${total} outputs ready` : `${c.done + c.failed} of ${total} outputs made`;
-  const inputs = Object.entries(job.inputs || {}).map(([k, n]) => `${n} ${k}`).join(", ");
-  $("#jobMeta").textContent = `${job.engine_name} · ${inputs}`;
+  $("#jobTitle").textContent = job.finished ? `${fmt(c.done)} of ${fmt(total)} outputs ready` : `${fmt(c.done + c.failed)} of ${fmt(total)} outputs made`;
+  const when = job.created ? new Date(job.created * 1000).toLocaleString() : "";
+  $("#jobMeta").textContent = `${job.engine_name} · ${plural(job.inputs.length, "input frame")} · job ${job.id}${when ? ` · ${when}` : ""}`;
   if (job.finished) live("Finished", "");
   const pct = (n) => `${(100 * n / Math.max(total, 1)).toFixed(2)}%`;
   document.querySelector(".m-done").style.width = pct(c.done);
-  document.querySelector(".m-failed").style.width = pct(c.failed);
+  document.querySelector(".m-failed").style.width = pct(c.failed + (c.interrupted || 0));
   document.querySelector(".m-running").style.width = pct(c.running);
-  $("#tally").innerHTML = [["all", "All", total], ...STATUS.map((s) => [s, LABEL[s], c[s]])]
+  $("#tally").innerHTML = [["all", "All", total], ...STATUS.map((s) => [s, LABEL[s], c[s] || 0])]
     .filter(([s, , n]) => s === "all" || n > 0)
-    .map(([s, label, n]) => `<button type="button" class="filter" data-filter="${s}" aria-pressed="${filter === s}">${label} ${n}</button>`).join("");
+    .map(([s, label, n]) => `<button type="button" class="filter" data-filter="${s}" aria-pressed="${filter === s}">${label} ${fmt(n)}</button>`).join("");
   document.querySelectorAll(".filter").forEach((b) => b.addEventListener("click", () => { filter = b.dataset.filter; renderSummary(); applyFilter(); }));
+  renderTokens();
+  // resume: outputs the service never made (it stopped) or that failed, run again on a click
+  const left = (c.interrupted || 0) + (($("#resumeFailed").checked && job.finished) ? c.failed : 0);
+  const canResume = job.finished && ((c.interrupted || 0) > 0 || c.failed > 0);
+  $("#resumeBtn").hidden = !canResume;
+  $("#resumeFailedWrap").hidden = !(canResume && c.failed > 0);
+  $("#resumeBtn").textContent = left ? `Resume ${fmt(left)} output${left === 1 ? "" : "s"}` : "Resume";
+  $("#resumeBtn").disabled = !left;
   const zip = $("#zipAll"), ready = job.finished && c.done > 0;
   zip.setAttribute("aria-disabled", String(!ready));
   zip.href = ready ? `/api/jobs/${job.id}/download.zip` : "#";
-  zip.textContent = job.finished ? `Download all ${c.done} (.zip)` : "Download all when finished";
+  zip.textContent = job.finished ? `Download all ${fmt(c.done)} (.zip)` : "Download all when finished";
+  zip.classList.toggle("primary", !canResume);      // while outputs are left to make, Resume is the main action
   const notes = $("#notes");
   notes.hidden = !(job.notes && job.notes.length);
   notes.innerHTML = (job.notes || []).map((n) => `<li>${esc(n)}</li>`).join("");
 }
+async function resumeJob(force) {
+  const msg = $("#resumeMsg"); msg.hidden = true;
+  const data = new FormData();
+  if ($("#resumeFailed").checked) data.append("failed", "1");
+  if (force) data.append("force", "1");
+  $("#resumeBtn").disabled = true;
+  try {
+    const res = await fetch(`/api/jobs/${job.id}/resume`, { method: "POST", body: data });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 409 && body.detail && body.detail.codex) {
+      msg.innerHTML = `${esc(body.detail.message)} <button type="button" class="btn-quiet" id="resumeForce">Run anyway</button>`;
+      msg.hidden = false;
+      $("#resumeForce").addEventListener("click", () => resumeJob(true));
+      return;
+    }
+    if (!res.ok) throw new Error(detail(body) || `The service answered ${res.status}.`);
+    job = body.job; renderJob(); connect(); loadCodex(); loadHistory();
+  } catch (ex) {
+    msg.textContent = String(ex.message || ex); msg.hidden = false;
+  } finally { if (job) renderSummary(); }
+}
+$("#resumeBtn").addEventListener("click", () => resumeJob(false));
+$("#resumeFailed").addEventListener("change", () => job && renderSummary());
 function applyFilter() {
   document.querySelectorAll(".card").forEach((el) => el.hidden = filter !== "all" && !el.classList.contains(filter));
+  document.querySelectorAll(".pair").forEach((row) => row.hidden = filter !== "all" && !row.querySelector(`.card.${filter}`));
 }
 function card(t) {
   const el = document.createElement("article");
   el.className = `card ${t.status}`; el.id = `card-${t.id}`;
   const shot = t.status === "done" ? `<img src="${esc(t.thumb || t.url)}" alt="${esc(t.case_title)} from ${esc(t.input)}" loading="lazy">`
     : t.status === "running" ? `<div class="spin" role="img" aria-label="Running"></div>`
-    : t.status === "failed" ? "No output" : "Waiting for a free thread";
+    : t.status === "queued" ? "Waiting for a free thread" : "No output";
   el.innerHTML = `<div class="shot">${shot}</div>
-    <div class="card-body"><div class="card-title">${esc(t.case_title)} <span class="mono">v${t.variant}</span></div>
-      <div class="card-file">${esc(t.input_kind)}/${esc(t.input)}</div>
-      ${t.status === "failed" ? `<div class="card-error">${esc(t.error || "No output")}</div>` : ""}</div>
+    <div class="card-body"><div class="card-title">${esc(t.case_title)} <span class="mono">v${t.variant}${t.rebuild_round ? ` · rebuild ${t.rebuild_round}` : ""}</span></div>
+      ${t.note ? `<div class="rebuild-note"><b>Request:</b> ${esc(t.note)}</div>` : ""}
+      ${t.status === "failed" || t.status === "interrupted" ? `<div class="card-error">${esc(t.error || "No output")}</div>` : ""}</div>
     <div class="card-foot"><span class="chip ${t.status}">${LABEL[t.status]}${t.seconds ? ` · ${t.seconds} s` : ""}</span>
+      ${typeof t.tokens === "number" ? `<span class="tok">${fmt(t.tokens)} tokens</span>` : ""}
+      ${["done", "failed", "interrupted"].includes(t.status) ? `<button type="button" class="btn-quiet" data-rebuild>Rebuild</button>` : ""}
       ${t.status === "done" ? `<a class="btn" href="${esc(t.url)}" download="${esc(t.output_name)}">Download</a>` : ""}</div>`;
+  const rb = el.querySelector("[data-rebuild]");
+  if (rb) rb.addEventListener("click", () => openRebuild(el, t));
   const img = el.querySelector("img");
-  if (img) img.addEventListener("click", () => {
-    $("#viewer img").src = t.url; $("#viewer img").alt = img.alt;
-    $("#viewerDownload").href = t.url; $("#viewerDownload").setAttribute("download", t.output_name);
-    $("#viewer").showModal();
-  });
+  if (img) img.addEventListener("click", () => view(t.url, `${t.case_title} v${t.variant} · ${t.input_kind}/${t.input}`, t.output_name));
   return el;
+}
+// rebuild: one more output for this frame and case, with the user's request for this image added to the prompt
+function openRebuild(el, t) {
+  if (el.querySelector(".rebuild-form")) return;
+  const form = document.createElement("form");
+  form.className = "rebuild-form";
+  form.innerHTML = `<label class="field" for="note-${t.id}" style="margin:0">What should change in this image?</label>
+    <textarea id="note-${t.id}" maxlength="1000" placeholder="e.g. make both loads wider, as wide as the forklift, and close the gap between them"></textarea>
+    <div class="err" hidden></div>
+    <div class="row"><button type="button" class="btn-quiet" data-cancel>Cancel</button>
+      <button type="button" class="btn-quiet" data-force hidden>Run anyway</button>
+      <button type="submit" class="go-small">Rebuild this output</button></div>`;
+  el.appendChild(form);
+  const area = form.querySelector("textarea"), err = form.querySelector(".err"), force = form.querySelector("[data-force]");
+  area.focus();
+  const send = async (forced) => {
+    const note = area.value.trim();
+    if (!note) { err.textContent = "Write what to change in this image."; err.hidden = false; return; }
+    const data = new FormData(); data.append("note", note); if (forced) data.append("force", "1");
+    form.querySelectorAll("button").forEach((b) => b.disabled = true);
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/tasks/${t.id}/rebuild`, { method: "POST", body: data });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 409 && body.detail && body.detail.codex) {
+        err.textContent = body.detail.message; err.hidden = false; force.hidden = false; return;
+      }
+      if (!res.ok) throw new Error(detail(body) || `The service answered ${res.status}.`);
+      job = body.job; renderJob(); loadCodex();
+      const added = document.getElementById(`card-${body.task.id}`);
+      if (added) added.scrollIntoView({ behavior: "smooth", block: "center" });
+    } catch (ex) {
+      err.textContent = String(ex.message || ex); err.hidden = false;
+    } finally { form.querySelectorAll("button").forEach((b) => b.disabled = false); }
+  };
+  form.addEventListener("submit", (e) => { e.preventDefault(); send(false); });
+  force.addEventListener("click", () => send(true));
+  form.querySelector("[data-cancel]").addEventListener("click", () => form.remove());
+}
+function view(url, caption, name) {
+  $("#viewer img").src = url; $("#viewer img").alt = caption;
+  $("#viewerCap").textContent = caption;
+  $("#viewerDownload").href = url; $("#viewerDownload").setAttribute("download", name);
+  $("#viewer").showModal();
 }
 $("#viewerClose").addEventListener("click", () => $("#viewer").close());
 $("#viewer").addEventListener("click", (e) => { if (e.target.id === "viewer") $("#viewer").close(); });
@@ -544,13 +928,16 @@ $("#viewer").addEventListener("click", (e) => { if (e.target.id === "viewer") $(
 (async () => {
   try {
     const data = await (await fetch("/api/engines")).json();
-    kinds = data.input_kinds; engines = data.engines;
+    kinds = data.input_kinds; engines = data.engines; perOutput = data.tokens_per_output;
   } catch (err) {
     $("#problem").textContent = "The service did not answer. Start it, then reload this page."; $("#problem").hidden = false;
     return;
   }
   $("#engine").innerHTML = engines.map((e) => `<option value="${e.id}">${esc(e.name)}</option>`).join("");
   renderCases();
+  loadHistory();
+  loadCodex();
+  setInterval(() => loadCodex(), 60000);
   const m = location.hash.match(/job=([\w-]+)/);
   if (m) {
     const res = await fetch(`/api/jobs/${m[1]}`);

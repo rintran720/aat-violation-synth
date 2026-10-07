@@ -23,6 +23,7 @@ is redone, and results.json keeps the earlier rows.
 """
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -43,19 +44,36 @@ KINDS = {
            "scuffed top",
     "skid": "a wooden base of top deck boards on 3 runners, with no bottom deck",
 }
-REF_NAMES = {"LSP": "An LSP (load spreader plate)", "SKID": "A skid"}
-RENDERS = {  # what the references are, for one and for several of them
-    1: ("Image 2 is a 3D render of a real object from this warehouse: the large tile is the main view, the small "
-        "tiles are\nother views of the SAME object. Copy only its appearance (colour, material, texture); it is not to "
-        "scale, and\nneither its size nor its viewpoint may be copied."),
-    2: ("Images 2-{last} are 3D renders of real objects from this warehouse: the large tile is the main view, the "
-        "small tiles are\nother views of the SAME object. Copy only their appearance (colour, material, texture); they "
-        "are not to scale, and\nneither their size nor their viewpoint may be copied."),
+# the LSP stand-in: one fixed grid of real CCTV crops of single empty LSPs (cam ch10, many pushed by a forklift's
+# forks), used only when the frame shows no LSP; the SKID is the catalogue render for the frame
+LSP_REFERENCE = ROOT / "work/ref-lsp.jpg"
+REFERENCE_TEXT = {
+    "LSP": ("An LSP (load spreader plate) reference, to use ONLY when image 1 shows no LSP: a grid of real CCTV "
+            "crops of single, empty LSPs of this warehouse, many of them being pushed by a forklift's forks. Every "
+            "tile shows the plate to copy. Copy only the plate's look (colour, worn top, thin edge with its dark "
+            "side face); never copy the grid, the captions under the tiles or any of its text, and take no size or "
+            "viewpoint from it."),
+    "SKID": ("A skid: {skid}. It is a 3D render of a real skid of this warehouse: the large tile is the main view, "
+             "the small tiles are other views of the SAME skid. Copy only its appearance (colour, material, texture); "
+             "it is not to scale, and neither its size nor its viewpoint may be copied."),
 }
+# what the warehouse objects are, so Astra does not take an LSP for a pallet or size it by its load (sizes:
+# config/standards.json and work/catalogue3d/README.md)
+OBJECTS = """What the objects are:
+- LSP (load spreader plate): one large, flat, rigid plate lying directly on the floor, about 1.9 m x 1.85 m and only
+  about 9 cm thick, dark grey to blue-black with a worn, scuffed top and slightly rounded corners. It has no legs, no
+  boards and no gaps, so it is not a pallet. Forklifts push it along the floor with their forks; cargo stands on it,
+  and it is clearly larger than the cargo on it, with bare plate showing around the load.
+- Skid: a wooden base about 1.2 m x 1.0 m and 13 cm high, top deck boards on 3 runners and no bottom deck. A cargo
+  load stands on a skid; a skid stands on an LSP or on the forks. It is smaller than an LSP.
+- Cargo: the load on a skid, about the skid's footprint and roughly 0.8-1.6 m tall: carton stacks, loads wrapped in
+  clear or black film, crates.
+- From the floor up: LSP, then skid, then cargo."""
 PROMPT = """You are given {count} reference images from a real CCTV camera in an air-cargo terminal warehouse:
 1. Full scene: the warehouse floor with {scene}.
 {references}
-{renders}
+
+{objects}
 
 Edit image 1 only. Keep the SAME fixed high-angle CCTV viewpoint, lighting, colors and image quality (slightly blurry
 wide-angle security-camera look). Do not change the camera angle, the floor, the red laser lines, the background,
@@ -84,11 +102,18 @@ def reference_prompt(reference_map: Path, change: str, scene: str = SCENE, refs=
     change."""
     entries = json.loads(reference_map.read_text())
     variants = json.loads((ROOT / "work/catalogue3d/variants.json").read_text())
-    def kind(category: str) -> str:
-        return variants[entries[category]["variant"]]["object"]
-    references = "\n".join(f"{i}. {REF_NAMES[ref]}: {KINDS[kind(ref)]}." for i, ref in enumerate(refs, 2))
-    renders = RENDERS[min(len(refs), 2)].format(last=len(refs) + 1)
-    return PROMPT.format(count=len(refs) + 1, scene=scene, references=references, renders=renders, change=change)
+    skid = KINDS[variants[entries["SKID"]["variant"]]["object"]] if "SKID" in refs else ""
+    references = "\n".join(f"{i}. {REFERENCE_TEXT[ref].format(skid=skid)}" for i, ref in enumerate(refs, 2))
+    return PROMPT.format(count=len(refs) + 1, scene=scene, references=references, objects=OBJECTS, change=change)
+
+
+def reference_image(ref: str, run: Path) -> Path:
+    """The image file of one reference: the fixed LSP crop sheet, or the frame's catalogue render (run/refs/)."""
+    if ref == "LSP":
+        if not LSP_REFERENCE.is_file():
+            raise RuntimeError(f"the LSP reference is missing: {LSP_REFERENCE}")
+        return LSP_REFERENCE
+    return run / "refs" / f"{ref}.png"
 
 
 def camera_sized(image: Path, run: Path) -> Path:
@@ -104,10 +129,21 @@ def camera_sized(image: Path, run: Path) -> Path:
     return copy
 
 
+def tokens_used(log: Path) -> int | None:
+    """The tokens the Codex CLI reports for one run ("tokens used" then the count, at the end of its log): the
+    Astra session's prompt, input images and replies. What the imagegen tool itself costs is not in it."""
+    try:
+        found = re.findall(r"tokens used\s*\n\s*([\d,]+)", log.read_text(errors="ignore"))
+    except OSError:
+        return None
+    return int(found[-1].replace(",", "")) if found else None
+
+
 def edit_frame(image: Path, run: Path, output: Path, seed: int, change: str, scene: str = SCENE,
                codex_bin: str = "codex", refs=("LSP", "SKID")) -> dict:
     """One Astra edit of one frame: the catalogue references in refs (seed picks the models) into run/, the edited
-    frame at its own size to output. Returns its result row (output or error, seconds); never raises."""
+    frame at its own size to output. Returns its result row (output or error, seconds, the tokens Astra reported);
+    never raises."""
     started = time.time()
     if run.exists():          # an earlier run stopped before this frame's output
         shutil.rmtree(run)
@@ -117,7 +153,7 @@ def edit_frame(image: Path, run: Path, output: Path, seed: int, change: str, sce
         command = [sys.executable, "-m", "synth.catalogue_reference_map", "--image", str(camera_sized(image, run)),
                    "--seed", str(seed), "--out", str(run / "refs")]
         subprocess.run(command, cwd=ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        images = [image] + [run / "refs" / f"{category}.png" for category in refs]
+        images = [image] + [reference_image(ref, run) for ref in refs]
         prompt = reference_prompt(run / "refs" / "reference_map.json", change, scene, refs)
         (run / "prompt.txt").write_text(prompt)
         raw = run / "raw.png"
@@ -131,6 +167,7 @@ def edit_frame(image: Path, run: Path, output: Path, seed: int, change: str, sce
                     "file or use Blender/3D compositing."]
         with (run / "astra.log").open("w") as log:
             code = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT).returncode
+        row["tokens"] = tokens_used(run / "astra.log")
         if code or not raw.is_file() or not raw.stat().st_size:
             raise RuntimeError(f"no image from Astra (codex exit {code}); see {run / 'astra.log'}")
         with Image.open(image) as source, Image.open(raw) as edited:
