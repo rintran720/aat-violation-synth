@@ -166,3 +166,12 @@ with". The earlier output stays; the new one is a task of the same job, shown be
 the rounds from the first output. It takes the same Codex usage check as a job (one output; "Run anyway" passes
 `force=1`).
 
+Review (the Review button on a job): a full-screen deck of the job's finished outputs, chosen as Review all (unreviewed
+first), Review good or Review bad. The output fills the screen, its input frame sits top left. Right arrow / swipe
+right / Good marks it good and moves on, left / Bad marks it bad, up and down move without marking, X / "Exclude input"
+takes that input frame (and all its outputs) out of review and downloads, with an Undo. Marks are stored per output
+(`review` in `job.json`, `POST /api/jobs/<id>/tasks/<task id>/review`, verdict good|bad|clear); excluded frames as
+`excluded_inputs` (`POST /api/jobs/<id>/inputs/<kind>/<name>/exclude`, excluded=1|0). The download menu takes all,
+good or bad outputs (never those of excluded frames), in one folder or a folder per case:
+`GET /api/jobs/<id>/download.zip?filter=all|good|bad&layout=flat|by_case`, written to a temporary file on disk.
+

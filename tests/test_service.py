@@ -138,7 +138,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.client.get(done["thumb"]).headers["content-type"], "image/jpeg")
         archive = zipfile.ZipFile(io.BytesIO(self.client.get(f"/api/jobs/{job['id']}/download.zip").content))
         self.assertEqual(len(archive.namelist()), 10)
-        self.assertTrue(all(name.split("/")[0] in violation_cases.INPUT_KINDS for name in archive.namelist()))
+        self.assertTrue(all("/" not in name for name in archive.namelist()))       # flat: one folder
 
     def test_images_uploaded_per_kind_feed_their_engine(self) -> None:
         response = self.client.post(
@@ -283,6 +283,46 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(retry["resumed"], 2)
         self.wait_finished(job["id"])
         self.assertEqual(self.client.post(f"/api/jobs/{job['id']}/resume").status_code, 400)   # nothing left
+
+    def test_review_marks_exclusion_and_filtered_downloads(self) -> None:
+        job = self.create().json()                                    # 12 outputs, 10 done
+        final = self.wait_finished(job["id"])
+        done = [t for t in final["tasks"] if t["status"] == "done"]
+        base = f"/api/jobs/{job['id']}"
+        self.assertEqual(final["review"], {"good": 0, "bad": 0, "unreviewed": 10, "outputs": 10})
+        failed = next(t for t in final["tasks"] if t["status"] == "failed")
+        self.assertEqual(self.client.post(f"{base}/tasks/{failed['id']}/review", data={"verdict": "good"}).status_code, 409)
+        self.assertEqual(self.client.post(f"{base}/tasks/{done[0]['id']}/review", data={"verdict": "maybe"}).status_code, 400)
+        for task in done[:3]:
+            self.client.post(f"{base}/tasks/{task['id']}/review", data={"verdict": "good"})
+        answer = self.client.post(f"{base}/tasks/{done[3]['id']}/review", data={"verdict": "bad"}).json()
+        self.assertEqual(answer["review"], {"good": 3, "bad": 1, "unreviewed": 6, "outputs": 10})
+        cleared = self.client.post(f"{base}/tasks/{done[2]['id']}/review", data={"verdict": "clear"}).json()
+        self.assertEqual(cleared["review"]["good"], 2)
+
+        def names(**params):
+            response = self.client.get(f"{base}/download.zip", params=params)
+            return response.status_code, sorted(zipfile.ZipFile(io.BytesIO(response.content)).namelist()) if response.status_code == 200 else []
+        self.assertEqual(names(filter="good")[1], sorted(t["output_name"] for t in done[:2]))
+        self.assertEqual(names(filter="bad")[1], [done[3]["output_name"]])
+        by_case = names(filter="all", layout="by_case")[1]
+        self.assertEqual(len(by_case), 10)
+        self.assertTrue(all(name.split("/")[0] in ("push_2_lsp_cargo", "push_3_lsp_cargo") for name in by_case))
+        self.assertEqual(self.client.get(f"{base}/download.zip", params={"filter": "nope"}).status_code, 400)
+
+        # X: the input of the first good output leaves review counts and every download; undo puts it back
+        kind, name = done[0]["input_kind"], done[0]["input"]
+        out = self.client.post(f"{base}/inputs/{kind}/{name}/exclude", data={"excluded": "1"}).json()
+        self.assertEqual(out["excluded_inputs"], [f"{kind}/{name}"])
+        left = [t for t in done if t["input"] != name]
+        self.assertEqual(out["review"]["outputs"], len(left))
+        self.assertTrue(all(name not in n for n in names(filter="all")[1]))
+        stored = json.loads((self.root / "jobs" / job["id"] / "job.json").read_text())
+        self.assertEqual(stored["excluded_inputs"], [f"{kind}/{name}"])
+        self.assertEqual(stored["tasks"][int(done[3]["id"][1:]) - 1]["review"], "bad")
+        back = self.client.post(f"{base}/inputs/{kind}/{name}/exclude", data={"excluded": "0"}).json()
+        self.assertEqual(back["excluded_inputs"], [])
+        self.assertEqual(self.client.post(f"{base}/inputs/{kind}/missing.png/exclude").status_code, 404)
 
     def test_bad_requests_are_refused(self) -> None:
         flat = self.root / "flat"

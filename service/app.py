@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import statistics
+import tempfile
 import threading
 import time
 import uuid
@@ -39,6 +40,7 @@ from pathlib import Path, PurePosixPath
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image
+from starlette.background import BackgroundTask
 from starlette.datastructures import UploadFile
 
 from service.codex_status import CodexUsage
@@ -108,7 +110,8 @@ USAGE = CodexUsage(ROOT / "work/service/usage.json", service_totals)
 
 class Job:
     def __init__(self, folder: Path, engine: str, cases: list[str], variants: int, inputs: dict[str, list[Path]],
-                 notes: list[str], created: float | None = None, tasks: list[dict] | None = None):
+                 notes: list[str], created: float | None = None, tasks: list[dict] | None = None,
+                 excluded: list[str] | None = None):
         self.id = folder.name
         self.folder = folder
         self.engine, self.cases, self.variants = engine, cases, variants
@@ -118,6 +121,7 @@ class Job:
         self.lock = threading.Lock()
         self.subscribers: set[WebSocket] = set()
         self.tasks = tasks if tasks is not None else self._plan()
+        self.excluded: set[str] = set(excluded or [])     # "<kind>/<name>" inputs the reviewer removed (X)
 
     def _plan(self) -> list[dict]:
         tasks, frame_index = [], 0
@@ -147,6 +151,10 @@ class Job:
         used = [t["tokens"] for t in tasks if isinstance(t.get("tokens"), int)]
         pending = counts["queued"] + counts["running"]
         per_output = token_stats()
+        excluded = sorted(self.excluded)
+        kept = [t for t in tasks if t["status"] == "done" and f"{t['input_kind']}/{t['input']}" not in self.excluded]
+        review = {"good": sum(t.get("review") == "good" for t in kept), "bad": sum(t.get("review") == "bad" for t in kept),
+                  "unreviewed": sum(not t.get("review") for t in kept), "outputs": len(kept)}
         return {
             "id": self.id, "created": self.created, "engine": self.engine,
             "engine_name": ENGINES[self.engine]["name"], "cases": self.cases, "variants": self.variants,
@@ -154,6 +162,7 @@ class Job:
                         "thumb": f"/api/jobs/{self.id}/input-thumbs/{kind}/{image.name}"}
                        for kind, images in self.inputs.items() for image in images],
             "notes": self.notes, "total": len(tasks), "counts": counts, "finished": pending == 0,
+            "review": review, "excluded_inputs": excluded,
             "tokens": {"used": sum(used), "outputs_counted": len(used),
                        "estimate_total": estimate(len(tasks)), "estimate_left": estimate(pending),
                        "per_output": per_output},
@@ -173,7 +182,7 @@ class Job:
             data = {"id": self.id, "created": self.created, "engine": self.engine, "cases": self.cases,
                     "variants": self.variants, "notes": self.notes,
                     "inputs": {kind: [image.name for image in images] for kind, images in self.inputs.items()},
-                    "tasks": [dict(task) for task in self.tasks]}
+                    "tasks": [dict(task) for task in self.tasks], "excluded_inputs": sorted(self.excluded)}
         temporary = self.folder / f"job.json.{threading.get_ident()}.tmp"
         temporary.write_text(json.dumps(data, indent=1))
         os.replace(temporary, self.folder / "job.json")
@@ -183,7 +192,7 @@ class Job:
         data = json.loads((folder / "job.json").read_text())
         inputs = {kind: [folder / "inputs" / kind / name for name in names] for kind, names in data["inputs"].items()}
         job = cls(folder, data["engine"], data["cases"], data["variants"], inputs, data.get("notes", []),
-                  data.get("created"), data["tasks"])
+                  data.get("created"), data["tasks"], data.get("excluded_inputs"))
         changed = False
         for task in job.tasks:       # the service stopped while these were waiting or running: they are not rerun
             if task["status"] in ("queued", "running"):
@@ -283,7 +292,9 @@ def run_task(job: Job, task: dict) -> None:
         finished = all(t["status"] not in ("queued", "running") for t in job.tasks)
     job.save()
     job.notify({"type": "task", "task": view})
-    job.notify({"type": "tokens", "tokens": job.public()["tokens"]})
+    state = job.public()
+    job.notify({"type": "tokens", "tokens": state["tokens"]})
+    job.notify({"type": "review", "review": state["review"]})     # a new output joins the unreviewed ones
     if finished:
         job.notify({"type": "job", "job": job.public()})
         USAGE.refresh(force=True)         # a calibration point: the percent used once these outputs are made
@@ -625,20 +636,79 @@ def input_thumbnail(job_id: str, kind: str, name: str) -> FileResponse:
     return thumb_of(path, job.folder / "thumbs" / "_inputs" / kind / f"{Path(name).stem}.jpg")
 
 
-@app.get("/api/jobs/{job_id}/download.zip")
-def download_all(job_id: str) -> StreamingResponse:
+@app.post("/api/jobs/{job_id}/tasks/{task_id}/review")
+async def review_task(job_id: str, task_id: str, request: Request) -> dict:
+    """Mark a finished output good or bad (verdict=good|bad), or clear its mark (verdict=clear)."""
     job = get_job(job_id)
+    verdict = str((await request.form()).get("verdict", ""))
+    if verdict not in ("good", "bad", "clear"):
+        raise HTTPException(400, "verdict must be good, bad or clear")
     with job.lock:
-        paths = [t["path"] for t in job.tasks if t["status"] == "done"]
-    if not paths:
-        raise HTTPException(404, "no outputs yet")
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:     # PNGs are compressed already
-        for path in paths:
-            archive.write(job.folder / "outputs" / path, path)
-    buffer.seek(0)
-    return StreamingResponse(buffer, media_type="application/zip",
-                             headers={"Content-Disposition": f'attachment; filename="{job.id}_outputs.zip"'})
+        task = next((t for t in job.tasks if t["id"] == task_id), None)
+        if task is None:
+            raise HTTPException(404, f"no task {task_id} in job {job_id}")
+        if task["status"] != "done":
+            raise HTTPException(409, "only a finished output can be reviewed")
+        if verdict == "clear":
+            task.pop("review", None)
+        else:
+            task["review"] = verdict
+        view = dict(task)
+    job.loop = job.loop or asyncio.get_running_loop()
+    job.save()
+    job.notify({"type": "task", "task": view})
+    job.notify({"type": "review", "review": job.public()["review"]})
+    return {"task": view, "review": job.public()["review"]}
+
+
+@app.post("/api/jobs/{job_id}/inputs/{kind}/{name}/exclude")
+async def exclude_input(job_id: str, kind: str, name: str, request: Request) -> dict:
+    """Take an input frame out of the job's review and downloads (excluded=1), or put it back (excluded=0). Its
+    outputs stay on disk."""
+    job, _ = job_input(job_id, kind, name)
+    excluded = str((await request.form()).get("excluded", "1")) in ("1", "true")
+    key = f"{kind}/{name}"
+    with job.lock:
+        (job.excluded.add if excluded else job.excluded.discard)(key)
+    job.loop = job.loop or asyncio.get_running_loop()
+    job.save()
+    state = job.public()
+    job.notify({"type": "job", "job": state})
+    return {"excluded_inputs": state["excluded_inputs"], "review": state["review"]}
+
+
+def selected_outputs(job: Job, which: str) -> list[dict]:
+    """The finished outputs a download takes: all, or only those marked good / bad; never those of excluded inputs."""
+    with job.lock:
+        tasks = [dict(t) for t in job.tasks if t["status"] == "done"
+                 and f"{t['input_kind']}/{t['input']}" not in job.excluded]
+    if which == "good":
+        return [t for t in tasks if t.get("review") == "good"]
+    if which == "bad":
+        return [t for t in tasks if t.get("review") == "bad"]
+    return tasks
+
+
+@app.get("/api/jobs/{job_id}/download.zip")
+def download_all(job_id: str, filter: str = "all", layout: str = "flat") -> FileResponse:
+    """A zip of the job's outputs: filter=all|good|bad, layout=flat (one folder) or by_case (a folder per violation
+    case). Written to a temporary file (a job's PNGs can be hundreds of MB) that is deleted once sent."""
+    job = get_job(job_id)
+    if filter not in ("all", "good", "bad") or layout not in ("flat", "by_case"):
+        raise HTTPException(400, "filter must be all, good or bad, and layout flat or by_case")
+    tasks = selected_outputs(job, filter)
+    if not tasks:
+        raise HTTPException(404, {"all": "no outputs yet", "good": "no outputs marked good yet",
+                                  "bad": "no outputs marked bad yet"}[filter])
+    handle, temporary = tempfile.mkstemp(prefix=f"{job.id}_", suffix=".zip", dir=JOBS_DIR)
+    os.close(handle)
+    with zipfile.ZipFile(temporary, "w", zipfile.ZIP_STORED) as archive:     # PNGs are compressed already
+        for task in tasks:
+            name = task["output_name"] if layout == "flat" else f"{task['case']}/{task['output_name']}"
+            archive.write(job.folder / "outputs" / task["path"], name)
+    label = f"{job.id}_{filter}{'_by_case' if layout == 'by_case' else ''}.zip"
+    return FileResponse(temporary, media_type="application/zip", filename=label,
+                        background=BackgroundTask(os.remove, temporary))
 
 
 @app.websocket("/ws/jobs/{job_id}")

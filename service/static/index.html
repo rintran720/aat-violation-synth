@@ -180,6 +180,65 @@
   .meter span { height: 100%; transition: width .3s ease; }
   .meter .m-done { background: var(--ok); } .meter .m-failed { background: var(--bad); } .meter .m-running { background: var(--run); }
   .summary-row { display: flex; flex-wrap: wrap; gap: 10px 24px; justify-content: space-between; align-items: center; }
+  /* review + download controls */
+  .ctl { display: inline-flex; align-items: center; gap: 6px; padding: 3px; border: 1px solid var(--rule); border-radius: 8px; }
+  .ctl select { width: auto; padding: 5px 6px; font-size: var(--step-0); background: var(--surface); border: 0; }
+  .ctl .btn, .ctl button { white-space: nowrap; }
+  button.review { background: var(--ink); color: var(--surface); border: 1px solid var(--ink); }
+  button.review:disabled, a.btn[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+  .rv-chip { font: 600 11px/1.7 var(--font-body); padding: 0 8px; border-radius: 99px; text-transform: uppercase;
+             letter-spacing: .05em; }
+  .rv-chip.good { background: var(--ok-soft); color: var(--ok); } .rv-chip.bad { background: var(--bad-soft); color: var(--bad); }
+  .card.rv-good { box-shadow: inset 0 0 0 2px var(--ok); } .card.rv-bad { box-shadow: inset 0 0 0 2px var(--bad); opacity: .8; }
+  .pair.excluded { opacity: .6; }
+  .pair.excluded .pair-outputs { display: none; }
+  .excluded-bar { grid-column: 1 / -1; display: flex; gap: 10px; align-items: center; padding: 10px 14px; font-size: var(--step-0);
+                  color: var(--ink-soft); }
+
+  /* the review dialog: a full-screen deck, the output large, its input frame top left */
+  dialog.reviewer { width: 100vw; height: 100vh; max-width: 100vw; max-height: 100vh; margin: 0; padding: 0; border: 0;
+                    background: #0b0f15; color: #e5e9ef; }
+  dialog.reviewer::backdrop { background: #0b0f15; }
+  .rv-wrap { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; gap: 10px;
+             padding: calc(env(safe-area-inset-top, 0px) + 12px) 16px calc(env(safe-area-inset-bottom, 0px) + 14px); }
+  .rv-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .rv-input { display: grid; gap: 4px; width: clamp(160px, 22vw, 340px); }
+  .rv-input span { font: 600 11px/1 var(--font-body); text-transform: uppercase; letter-spacing: .08em; color: #9aa5b4; }
+  .rv-input img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; border: 1px solid #2d3644; cursor: zoom-in; }
+  .rv-input img.big { position: fixed; inset: 5vh 5vw; width: 90vw; height: 90vh; object-fit: contain; z-index: 5;
+                      background: #0b0f15; cursor: zoom-out; aspect-ratio: auto; }
+  .rv-head { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+  .rv-pos { font: 600 var(--step-2) var(--font-display); font-variant-numeric: tabular-nums; }
+  .rv-close { background: transparent; color: #e5e9ef; border: 1px solid #2d3644; border-radius: 6px; padding: 6px 12px;
+              font: 600 var(--step-0) var(--font-body); cursor: pointer; }
+  .rv-stage { position: relative; min-height: 0; overflow: hidden; touch-action: none; user-select: none; }
+  .rv-stage img { position: absolute; inset: 0; margin: auto; width: auto; height: auto; max-width: 100%; max-height: 100%;
+                  object-fit: contain; border-radius: 8px; transition: transform .18s ease, opacity .18s ease; -webkit-user-drag: none; }
+  /* an output already reviewed shows its verdict as a frame around the image */
+  .rv-stage img.rv-good { box-shadow: 0 0 0 6px #6fd18f, 0 0 24px rgba(111, 209, 143, .45); }
+  .rv-stage img.rv-bad { box-shadow: 0 0 0 6px #ff8c8c, 0 0 24px rgba(255, 140, 140, .4); }
+  .rv-stamp { position: absolute; top: 18px; padding: 6px 16px; border: 3px solid; border-radius: 8px; font: 700 28px var(--font-display);
+              letter-spacing: .08em; opacity: 0; transform: rotate(-10deg); pointer-events: none; }
+  .rv-stamp.good { left: 24px; color: #6fd18f; } .rv-stamp.bad { right: 24px; color: #ff8c8c; transform: rotate(10deg); }
+  .rv-meta { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 14px; font-size: var(--step-1); color: #c7cfda; }
+  .rv-meta .rv-chip.none { background: #252d39; color: #9aa5b4; }
+  .rv-actions { display: flex; justify-content: center; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .rv-actions button { border-radius: 99px; border: 2px solid; background: transparent; cursor: pointer; color: #e5e9ef;
+                       font: 600 var(--step-1) var(--font-body); padding: 10px 18px; min-width: 64px; }
+  .rv-actions .bad { border-color: #ff8c8c; color: #ff8c8c; } .rv-actions .good { border-color: #6fd18f; color: #6fd18f; }
+  .rv-actions .nav, .rv-actions .exclude { border-color: #2d3644; }
+  .rv-actions .exclude { color: #f0c060; border-color: #6b5a2a; }
+  .rv-actions button:focus-visible { outline: 2px solid #e5e9ef; outline-offset: 2px; }
+  .rv-keys { text-align: center; font-size: 12px; color: #7d8898; }
+  .rv-toast { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 96px); transform: translateX(-50%);
+              background: #222a36; color: #e5e9ef; border: 1px solid #2d3644; padding: 10px 14px; border-radius: 8px;
+              font-size: var(--step-0); display: flex; gap: 12px; align-items: center; z-index: 6; }
+  .rv-toast button { background: transparent; border: 0; color: #7db4f5; font: 600 var(--step-0) var(--font-body); cursor: pointer; }
+  .rv-done { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; gap: 14px; }
+  .rv-done h3 { margin: 0; font: 600 var(--step-4) var(--font-display); }
+  .rv-done .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .rv-done a.btn { background: #19202a; color: #e5e9ef; border-color: #2d3644; }
+  @media (prefers-reduced-motion: reduce) { .rv-stage img { transition: none; } }
   .summary-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   button.resume { background: var(--engine); border: 1px solid var(--engine); color: var(--on-engine);
                   padding: 8px 14px; font-size: var(--step-1); }
@@ -382,7 +441,21 @@
           <div class="summary-actions">
             <button type="button" id="resumeBtn" class="btn-quiet resume" hidden>Resume</button>
             <label class="resume-failed" id="resumeFailedWrap" hidden><input type="checkbox" id="resumeFailed"> also retry failed</label>
-            <a id="zipAll" class="btn primary" href="#" aria-disabled="true">Download all</a>
+            <span class="ctl" title="Review the outputs one by one">
+              <select id="reviewSet" aria-label="Which outputs to review">
+                <option value="all">Review all</option><option value="good">Review good</option><option value="bad">Review bad</option>
+              </select>
+              <button type="button" id="reviewBtn" class="btn-quiet review">Review</button>
+            </span>
+            <span class="ctl" title="Download the outputs as a zip">
+              <select id="dlFilter" aria-label="Which outputs to download">
+                <option value="all">All outputs</option><option value="good">Good only</option><option value="bad">Bad only</option>
+              </select>
+              <select id="dlLayout" aria-label="Zip layout">
+                <option value="flat">One folder</option><option value="by_case">Folder per case</option>
+              </select>
+              <a id="zipAll" class="btn primary" href="#" aria-disabled="true">Download</a>
+            </span>
           </div>
         </div>
         <div class="meter" aria-hidden="true"><span class="m-done"></span><span class="m-failed"></span><span class="m-running"></span></div>
@@ -401,6 +474,31 @@
   </div>
 </main>
 
+<dialog id="reviewer" class="reviewer" aria-label="Review outputs">
+  <div class="rv-wrap">
+    <div class="rv-top">
+      <div class="rv-input"><span>Input</span><img id="rvInput" alt="Input frame"></div>
+      <div class="rv-head"><span class="rv-pos" id="rvPos"></span><button type="button" class="rv-close" id="rvClose">Close (Esc)</button></div>
+    </div>
+    <div class="rv-stage" id="rvStage">
+      <img id="rvImg" alt="">
+      <span class="rv-stamp good" id="rvStampGood">GOOD</span><span class="rv-stamp bad" id="rvStampBad">BAD</span>
+      <div class="rv-done" id="rvDone" hidden></div>
+    </div>
+    <div class="rv-meta" id="rvMeta"></div>
+    <div>
+      <div class="rv-actions" id="rvActions">
+        <button type="button" class="bad" id="rvBad" title="Mark bad (←)">← Bad</button>
+        <button type="button" class="nav" id="rvPrev" title="Previous (↑)">↑</button>
+        <button type="button" class="exclude" id="rvExclude" title="Remove this input frame from the list (X)">✕ Exclude input</button>
+        <button type="button" class="nav" id="rvNext" title="Next (↓)">↓</button>
+        <button type="button" class="good" id="rvGood" title="Mark good (→)">Good →</button>
+      </div>
+      <div class="rv-keys">→ good · ← bad · ↑ ↓ move · X exclude the input · swipe the image the same ways</div>
+    </div>
+  </div>
+  <div class="rv-toast" id="rvToast" hidden></div>
+</dialog>
 <dialog id="viewer">
   <div class="viewer">
     <img alt="">
@@ -739,6 +837,7 @@ function connect() {
     if (msg.type === "job") { job = msg.job; renderJob(); if (job.finished) loadCodex(true); }
     else if (msg.type === "task") updateTask(msg.task);
     else if (msg.type === "tokens") { job.tokens = msg.tokens; renderTokens(); }
+    else if (msg.type === "review") { job.review = msg.review; renderSummary(); applyFilter(); }
     else if (msg.type === "error") live(msg.error, "lost");
   };
   socket.onclose = () => {
@@ -772,9 +871,11 @@ function renderJob() {
   const rows = $("#pairRows");
   rows.innerHTML = "";
   if (!job.inputs.length) rows.innerHTML = `<div class="pairs-empty">This job has no inputs.</div>`;
+  const excluded = new Set(job.excluded_inputs || []);
   for (const input of job.inputs) {
     const row = document.createElement("div");
-    row.className = "pair"; row.dataset.input = `${input.kind}/${input.name}`;
+    const key = `${input.kind}/${input.name}`;
+    row.className = `pair${excluded.has(key) ? " excluded" : ""}`; row.dataset.input = key;
     row.innerHTML = `<div class="pair-input">
         <div class="frame"><img src="${esc(input.thumb)}" alt="Input ${esc(input.name)}" loading="lazy"></div>
         <div class="in-name">${esc(input.name)}</div>
@@ -784,6 +885,13 @@ function renderJob() {
     row.querySelector(".frame img").addEventListener("click", () => view(input.url, `Input · ${input.kind}/${input.name}`, input.name));
     const outs = row.querySelector(".pair-outputs");
     job.tasks.filter((t) => t.input_kind === input.kind && t.input === input.name).forEach((t) => outs.appendChild(card(t)));
+    if (excluded.has(key)) {
+      const bar = document.createElement("div");
+      bar.className = "excluded-bar";
+      bar.innerHTML = `Excluded from review and downloads. <button type="button" class="btn-quiet">Undo</button>`;
+      bar.querySelector("button").addEventListener("click", () => setExcluded(input.kind, input.name, false));
+      row.appendChild(bar);
+    }
     rows.appendChild(row);
   }
   applyFilter();
@@ -811,7 +919,9 @@ function renderSummary() {
   document.querySelector(".m-done").style.width = pct(c.done);
   document.querySelector(".m-failed").style.width = pct(c.failed + (c.interrupted || 0));
   document.querySelector(".m-running").style.width = pct(c.running);
-  $("#tally").innerHTML = [["all", "All", total], ...STATUS.map((s) => [s, LABEL[s], c[s] || 0])]
+  const rv = job.review || { good: 0, bad: 0, unreviewed: 0, outputs: 0 };
+  $("#tally").innerHTML = [["all", "All", total], ...STATUS.map((s) => [s, LABEL[s], c[s] || 0]),
+                           ["rv-good", "Good", rv.good], ["rv-bad", "Bad", rv.bad], ["rv-none", "Unreviewed", rv.unreviewed]]
     .filter(([s, , n]) => s === "all" || n > 0)
     .map(([s, label, n]) => `<button type="button" class="filter" data-filter="${s}" aria-pressed="${filter === s}">${label} ${fmt(n)}</button>`).join("");
   document.querySelectorAll(".filter").forEach((b) => b.addEventListener("click", () => { filter = b.dataset.filter; renderSummary(); applyFilter(); }));
@@ -823,11 +933,16 @@ function renderSummary() {
   $("#resumeFailedWrap").hidden = !(canResume && c.failed > 0);
   $("#resumeBtn").textContent = left ? `Resume ${fmt(left)} output${left === 1 ? "" : "s"}` : "Resume";
   $("#resumeBtn").disabled = !left;
-  const zip = $("#zipAll"), ready = job.finished && c.done > 0;
-  zip.setAttribute("aria-disabled", String(!ready));
-  zip.href = ready ? `/api/jobs/${job.id}/download.zip` : "#";
-  zip.textContent = job.finished ? `Download all ${fmt(c.done)} (.zip)` : "Download all when finished";
+  // download: all / good / bad outputs (never those of excluded inputs), in one folder or one folder per case
+  const which = $("#dlFilter").value, count = which === "good" ? rv.good : which === "bad" ? rv.bad : rv.outputs;
+  const zip = $("#zipAll");
+  zip.setAttribute("aria-disabled", String(!count));
+  zip.href = count ? `/api/jobs/${job.id}/download.zip?filter=${which}&layout=${$("#dlLayout").value}` : "#";
+  zip.textContent = count ? `Download ${fmt(count)} (.zip)` : (which === "all" ? "Nothing to download yet" : `No ${which} outputs yet`);
   zip.classList.toggle("primary", !canResume);      // while outputs are left to make, Resume is the main action
+  const set = $("#reviewSet").value, queueSize = reviewQueue(set).length;
+  $("#reviewBtn").disabled = !queueSize;
+  $("#reviewBtn").textContent = queueSize ? `Review ${fmt(queueSize)}` : "Review";
   const notes = $("#notes");
   notes.hidden = !(job.notes && job.notes.length);
   notes.innerHTML = (job.notes || []).map((n) => `<li>${esc(n)}</li>`).join("");
@@ -855,13 +970,158 @@ async function resumeJob(force) {
 }
 $("#resumeBtn").addEventListener("click", () => resumeJob(false));
 $("#resumeFailed").addEventListener("change", () => job && renderSummary());
+// ---------- review ----------
+function isExcluded(t) { return (job.excluded_inputs || []).includes(`${t.input_kind}/${t.input}`); }
+function reviewQueue(set) {
+  const done = job.tasks.filter((t) => t.status === "done" && !isExcluded(t));
+  if (set === "good") return done.filter((t) => t.review === "good");
+  if (set === "bad") return done.filter((t) => t.review === "bad");
+  return [...done.filter((t) => !t.review), ...done.filter((t) => t.review)];   // unreviewed first
+}
+let deck = null;     // { queue: [task ids], at, set }
+function inputOf(t) { return job.inputs.find((i) => i.kind === t.input_kind && i.name === t.input); }
+function taskById(id) { return job.tasks.find((t) => t.id === id); }
+function openReview() {
+  const set = $("#reviewSet").value, queue = reviewQueue(set).map((t) => t.id);
+  if (!queue.length) return;
+  deck = { queue, at: 0, set };
+  $("#reviewer").showModal();
+  showCard();
+}
+function showCard() {
+  const done = deck.at >= deck.queue.length;
+  $("#rvDone").hidden = !done; $("#rvImg").hidden = done; $("#rvActions").hidden = done;
+  ["rvStampGood", "rvStampBad"].forEach((id) => $(`#${id}`).style.opacity = 0);
+  if (done) { showDone(); return; }
+  const t = taskById(deck.queue[deck.at]), input = inputOf(t);
+  const img = $("#rvImg");
+  img.style.transform = ""; img.style.opacity = 1;
+  img.classList.toggle("rv-good", t.review === "good");
+  img.classList.toggle("rv-bad", t.review === "bad");
+  img.src = t.url; img.alt = `${t.case_title} from ${t.input}`;
+  $("#rvInput").src = input ? input.thumb : ""; $("#rvInput").classList.remove("big");
+  $("#rvPos").textContent = `${fmt(deck.at + 1)} / ${fmt(deck.queue.length)}`;
+  const chip = t.review ? `<span class="rv-chip ${t.review}">${t.review}</span>` : `<span class="rv-chip none">unreviewed</span>`;
+  $("#rvMeta").innerHTML = `<strong>${esc(t.case_title)}</strong><span class="mono">v${t.variant}${t.rebuild_round ? ` · rebuild ${t.rebuild_round}` : ""}</span>
+    <span class="mono">${esc(t.input_kind)}/${esc(t.input)}</span>${chip}${t.note ? `<span>Request: ${esc(t.note)}</span>` : ""}`;
+  const next = taskById(deck.queue[deck.at + 1]);
+  if (next) new Image().src = next.url;                // preload the next output
+}
+function showDone() {
+  const rv = job.review || {};
+  $("#rvPos").textContent = "";
+  $("#rvMeta").innerHTML = "";
+  const link = (which, label, n) => n ? `<a class="btn" href="/api/jobs/${job.id}/download.zip?filter=${which}&layout=${$("#dlLayout").value}">${label} (${fmt(n)})</a>` : "";
+  $("#rvDone").innerHTML = `<div><h3>Reviewed ${fmt(deck.queue.length)}</h3>
+    <p>Good ${fmt(rv.good || 0)} · Bad ${fmt(rv.bad || 0)} · Unreviewed ${fmt(rv.unreviewed || 0)} in this job</p>
+    <div class="row">${link("good", "Download good", rv.good)}${link("bad", "Download bad", rv.bad)}${link("all", "Download all", rv.outputs)}
+      <button type="button" class="rv-close" id="rvRestart">Review again</button></div></div>`;
+  $("#rvRestart").addEventListener("click", () => { closeReview(); openReview(); });
+}
+function closeReview() { if ($("#reviewer").open) $("#reviewer").close(); deck = null; renderJob(); }
+function toast(html, ms = 5000) {
+  const el = $("#rvToast"); el.innerHTML = html; el.hidden = false;
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => el.hidden = true, ms);
+  return el;
+}
+async function mark(verdict) {
+  if (!deck || deck.at >= deck.queue.length) return;
+  const t = taskById(deck.queue[deck.at]), before = t.review;
+  t.review = verdict;                                   // optimistic: the next card shows at once
+  const img = $("#rvImg");
+  img.style.transform = `translateX(${verdict === "good" ? 60 : -60}vw) rotate(${verdict === "good" ? 18 : -18}deg)`; img.style.opacity = 0;
+  $(`#${verdict === "good" ? "rvStampGood" : "rvStampBad"}`).style.opacity = 1;
+  setTimeout(() => { deck.at++; showCard(); }, matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180);
+  const data = new FormData(); data.append("verdict", verdict);
+  try {
+    const res = await fetch(`/api/jobs/${job.id}/tasks/${t.id}/review`, { method: "POST", body: data });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detail(body) || `The service answered ${res.status}.`);
+    job.review = body.review;
+  } catch (ex) {
+    if (before) t.review = before; else delete t.review;
+    toast(`Not saved: ${esc(String(ex.message || ex))}`);
+  }
+}
+function move(step) {
+  if (!deck) return;
+  deck.at = Math.max(0, Math.min(deck.queue.length - (step > 0 ? 0 : 1), deck.at + step));
+  showCard();
+}
+async function setExcluded(kind, name, excluded) {
+  const data = new FormData(); data.append("excluded", excluded ? "1" : "0");
+  const res = await fetch(`/api/jobs/${job.id}/inputs/${encodeURIComponent(kind)}/${encodeURIComponent(name)}/exclude`, { method: "POST", body: data });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(detail(body) || `The service answered ${res.status}.`);
+  job.excluded_inputs = body.excluded_inputs; job.review = body.review;
+  if (!deck) { renderJob(); }
+}
+async function excludeCurrent() {
+  if (!deck || deck.at >= deck.queue.length) return;
+  const t = taskById(deck.queue[deck.at]), kind = t.input_kind, name = t.input;
+  const removed = deck.queue.map((id, i) => [id, i]).filter(([id]) => { const x = taskById(id); return x.input_kind === kind && x.input === name; });
+  try { await setExcluded(kind, name, true); } catch (ex) { toast(`Not excluded: ${esc(String(ex.message || ex))}`); return; }
+  const at = deck.at;
+  deck.queue = deck.queue.filter((id) => !removed.some(([r]) => r === id));
+  deck.at = Math.min(at - removed.filter(([, i]) => i < at).length, deck.queue.length);
+  showCard();
+  const el = toast(`Excluded ${esc(name)} (${plural(removed.length, "output")}). <button type="button">Undo</button>`, 7000);
+  el.querySelector("button").addEventListener("click", async () => {
+    try { await setExcluded(kind, name, false); } catch (ex) { toast(`Undo failed: ${esc(String(ex.message || ex))}`); return; }
+    const ids = removed.map(([id]) => id);
+    deck.queue.splice(deck.at, 0, ...ids);
+    el.hidden = true; showCard();
+  });
+}
+$("#reviewBtn").addEventListener("click", openReview);
+$("#reviewSet").addEventListener("change", () => job && renderSummary());
+$("#dlFilter").addEventListener("change", () => job && renderSummary());
+$("#dlLayout").addEventListener("change", () => job && renderSummary());
+$("#rvClose").addEventListener("click", closeReview);
+$("#reviewer").addEventListener("close", () => { if (deck) { deck = null; renderJob(); } });
+$("#rvGood").addEventListener("click", () => mark("good"));
+$("#rvBad").addEventListener("click", () => mark("bad"));
+$("#rvNext").addEventListener("click", () => move(1));
+$("#rvPrev").addEventListener("click", () => move(-1));
+$("#rvExclude").addEventListener("click", excludeCurrent);
+$("#rvInput").addEventListener("click", (e) => e.target.classList.toggle("big"));
+document.addEventListener("keydown", (e) => {
+  if (!deck || !$("#reviewer").open || (e.target.closest && e.target.closest("input, textarea, select"))) return;
+  const act = { ArrowRight: () => mark("good"), ArrowLeft: () => mark("bad"), ArrowDown: () => move(1),
+                ArrowUp: () => move(-1), x: excludeCurrent, X: excludeCurrent, Delete: excludeCurrent }[e.key];
+  if (act) { e.preventDefault(); act(); }
+});
+// swipe / drag the image: right = good, left = bad, up / down = previous / next
+(() => {
+  const stage = $("#rvStage"), img = $("#rvImg");
+  let start = null;
+  stage.addEventListener("pointerdown", (e) => { if (!deck || deck.at >= deck.queue.length) return; start = { x: e.clientX, y: e.clientY }; stage.setPointerCapture(e.pointerId); img.style.transition = "none"; });
+  stage.addEventListener("pointermove", (e) => {
+    if (!start) return;
+    const dx = e.clientX - start.x, dy = e.clientY - start.y;
+    img.style.transform = Math.abs(dx) > Math.abs(dy) ? `translateX(${dx}px) rotate(${dx / 25}deg)` : `translateY(${dy}px)`;
+    $("#rvStampGood").style.opacity = Math.max(0, Math.min(1, dx / 120));
+    $("#rvStampBad").style.opacity = Math.max(0, Math.min(1, -dx / 120));
+  });
+  const end = (e) => {
+    if (!start) return;
+    const dx = e.clientX - start.x, dy = e.clientY - start.y;
+    start = null; img.style.transition = "";
+    if (Math.abs(dx) > 90 && Math.abs(dx) > Math.abs(dy)) mark(dx > 0 ? "good" : "bad");
+    else if (Math.abs(dy) > 90) move(dy > 0 ? 1 : -1);
+    else { img.style.transform = ""; $("#rvStampGood").style.opacity = 0; $("#rvStampBad").style.opacity = 0; }
+  };
+  stage.addEventListener("pointerup", end);
+  stage.addEventListener("pointercancel", end);
+})();
+
 function applyFilter() {
   document.querySelectorAll(".card").forEach((el) => el.hidden = filter !== "all" && !el.classList.contains(filter));
   document.querySelectorAll(".pair").forEach((row) => row.hidden = filter !== "all" && !row.querySelector(`.card.${filter}`));
 }
 function card(t) {
   const el = document.createElement("article");
-  el.className = `card ${t.status}`; el.id = `card-${t.id}`;
+  el.className = `card ${t.status} ${t.status === "done" ? (t.review ? `rv-${t.review}` : "rv-none") : ""}`; el.id = `card-${t.id}`;
   const shot = t.status === "done" ? `<img src="${esc(t.thumb || t.url)}" alt="${esc(t.case_title)} from ${esc(t.input)}" loading="lazy">`
     : t.status === "running" ? `<div class="spin" role="img" aria-label="Running"></div>`
     : t.status === "queued" ? "Waiting for a free thread" : "No output";
@@ -870,6 +1130,7 @@ function card(t) {
       ${t.note ? `<div class="rebuild-note"><b>Request:</b> ${esc(t.note)}</div>` : ""}
       ${t.status === "failed" || t.status === "interrupted" ? `<div class="card-error">${esc(t.error || "No output")}</div>` : ""}</div>
     <div class="card-foot"><span class="chip ${t.status}">${LABEL[t.status]}${t.seconds ? ` · ${t.seconds} s` : ""}</span>
+      ${t.review ? `<span class="rv-chip ${t.review}">${t.review}</span>` : ""}
       ${typeof t.tokens === "number" ? `<span class="tok">${fmt(t.tokens)} tokens</span>` : ""}
       ${["done", "failed", "interrupted"].includes(t.status) ? `<button type="button" class="btn-quiet" data-rebuild>Rebuild</button>` : ""}
       ${t.status === "done" ? `<a class="btn" href="${esc(t.url)}" download="${esc(t.output_name)}">Download</a>` : ""}</div>`;
