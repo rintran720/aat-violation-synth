@@ -20,6 +20,7 @@ from service.codex_status import CodexUsage
 from synth import violation_cases
 
 PUSH, SKIDS = "forklift-pushing-multiple-lsps", "forklift-charging-multiple-skids-horizontally"
+FLOOR = "floor-opening"
 
 
 def png(color: str = "gray") -> bytes:
@@ -62,7 +63,7 @@ class ServiceTests(unittest.TestCase):
                 "used_percent": self.used_percent, "window_minutes": 10080, "resets_at": 1_800_000_000,
                 "secondary_used_percent": None, "secondary_resets_at": None, "read_at": time.time()}
 
-    def fake_edit(self, image, run, output, seed, change, scene, refs=None):
+    def fake_edit(self, image, run, output, seed, change, scene, refs=None, context=None):
         with self.lock:
             self.running += 1
             self.peak = max(self.peak, self.running)
@@ -260,6 +261,55 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/jobs/{job['id']}/tasks/t9999/rebuild",
                                           data={"note": "x"}).status_code, 404)
 
+    def test_a_batch_rebuild_adds_one_output_per_chosen_output_with_one_request(self) -> None:
+        job = self.create().json()                                    # 12 outputs, 10 done, 2 failed
+        final = self.wait_finished(job["id"])
+        done = [t for t in final["tasks"] if t["status"] == "done"]
+        failed = next(t for t in final["tasks"] if t["status"] == "failed")
+        chosen = [done[0]["id"], done[3]["id"], failed["id"], done[0]["id"]]       # the repeat is made once
+        answer = self.client.post(f"/api/jobs/{job['id']}/rebuild",
+                                  data={"task": chosen, "note": "  close the gap   between the LSPs "})
+        self.assertEqual(answer.status_code, 200, answer.text)
+        added = answer.json()["tasks"]
+        self.assertEqual([t["rebuilt_from"] for t in added], [done[0]["id"], done[3]["id"], failed["id"]])
+        self.assertEqual({t["note"] for t in added}, {"close the gap between the LSPs"})
+        self.assertTrue(all(t["output_name"].endswith("__r1.png") for t in added))
+        state = self.wait_finished(job["id"])
+        self.assertEqual(state["total"], final["total"] + 3)
+        for task in added:
+            call = next(c for c in self.calls if c["output"].name == task["output_name"])
+            self.assertIn("close the gap between the LSPs", call["change"])
+        made = [t for t in state["tasks"] if t["id"] in {a["id"] for a in added}]
+        self.assertEqual([t["status"] for t in made], ["done", "done", "failed"])   # fake_edit fails b.png v2 again
+        self.assertFalse(any("review" in t for t in made))
+        self.assertEqual(state["review"]["unreviewed"], final["review"]["unreviewed"] + 2)   # new ones await review
+        again = self.client.post(f"/api/jobs/{job['id']}/rebuild",
+                                 data={"task": [done[0]["id"], added[0]["id"]], "note": "wider"}).json()["tasks"]
+        self.assertEqual([t["rebuild_round"] for t in again], [2, 3])             # rounds count from the first output
+        self.assertEqual(len({t["output_name"] for t in again}), 2)
+        self.wait_finished(job["id"])
+
+    def test_a_batch_rebuild_refuses_bad_choices_and_adds_nothing(self) -> None:
+        job = self.create().json()
+        busy = job["tasks"][-1]["id"]                                  # still waiting for a free thread
+        url = f"/api/jobs/{job['id']}/rebuild"
+        self.assertEqual(self.client.post(url, data={"task": [busy], "note": "x"}).status_code, 409)
+        final = self.wait_finished(job["id"])
+        done = next(t for t in final["tasks"] if t["status"] == "done")["id"]
+        self.assertEqual(self.client.post(url, data={"task": [done], "note": "  "}).status_code, 400)
+        self.assertEqual(self.client.post(url, data={"note": "x"}).status_code, 400)
+        self.assertEqual(self.client.post(url, data={"task": [done], "note": "x" * 1001}).status_code, 400)
+        self.assertEqual(self.client.post(url, data={"task": [done, "t9999"], "note": "x"}).status_code, 404)
+        self.assertEqual(self.client.post("/api/jobs/nojob/rebuild", data={"task": [done], "note": "x"}).status_code, 404)
+        self.assertEqual(self.client.get(f"/api/jobs/{job['id']}").json()["total"], final["total"])
+        self.limit_reached = True
+        self.client.get("/api/codex?refresh=true")
+        refused = self.client.post(url, data={"task": [done], "note": "x"})
+        self.assertEqual(refused.status_code, 409)
+        self.assertIn("codex", refused.json()["detail"])
+        self.assertEqual(self.client.post(url, data={"task": [done], "note": "x", "force": "1"}).status_code, 200)
+        self.wait_finished(job["id"])
+
     def test_resume_runs_the_interrupted_outputs_and_the_failed_ones_on_request(self) -> None:
         job = self.create().json()                                    # 12 outputs, 2 of them fail (b.png v2)
         self.wait_finished(job["id"])
@@ -414,6 +464,67 @@ class CaseTests(unittest.TestCase):
         self.assertIn("never copy the grid, the captions under the tiles or any of its text", prompt)
         self.assertEqual(batch.LSP_REFERENCE.name, "ref-lsp.jpg")
         self.assertNotIn("3D renders of real objects", prompt)
+
+    def test_floor_opening_takes_closed_frames_and_has_four_open_cases(self) -> None:
+        engine = violation_cases.ENGINES[FLOOR]
+        self.assertEqual(list(engine["cases"]), ["open_with_person", "open_no_person", "open_main_door_closed",
+                                                 "open_main_door_open"])
+        for case_id, case in engine["cases"].items():
+            self.assertEqual(list(case["changes"]), ["floor-closed"])
+            self.assertEqual(case["refs"], ["FLOOR_OPENING"])
+            self.assertIn("is now OPEN", violation_cases.change(FLOOR, case_id, "floor-closed"))
+        self.assertIn("Nobody is in the scene", violation_cases.change(FLOOR, "open_no_person", "floor-closed"))
+        self.assertIn("main door is CLOSED", violation_cases.change(FLOOR, "open_main_door_closed", "floor-closed"))
+        self.assertIn("main door is OPEN", violation_cases.change(FLOOR, "open_main_door_open", "floor-closed"))
+
+    def test_the_floor_prompt_has_no_warehouse_or_catalogue_and_runs_no_reference_map(self) -> None:
+        from synth import try_astra_edit_batch as batch
+        prompt = batch.reference_prompt(None, "open it", violation_cases.INPUT_KINDS["floor-closed"]["scene"],
+                                        ["FLOOR_OPENING"], violation_cases.prompt_context(FLOOR))
+        self.assertIn("floor hatch", prompt)
+        self.assertIn("on-screen timestamp", prompt)
+        self.assertNotIn("warehouse", prompt)
+        self.assertNotIn("LSP", prompt)
+        self.assertEqual(batch.reference_image("FLOOR_OPENING", Path("/run")), batch.FLOOR_OPENING_REFERENCE)
+        with tempfile.TemporaryDirectory() as folder:
+            frame = Path(folder) / "f.png"
+            Image.new("RGB", (64, 36), "gray").save(frame)
+            with mock.patch.object(batch.subprocess, "run", return_value=mock.Mock(returncode=1)) as run:
+                row = batch.edit_frame(frame, Path(folder) / "run", Path(folder) / "out.png", 0,
+                                       violation_cases.change(FLOOR, "open_no_person", "floor-closed"),
+                                       refs=["FLOOR_OPENING"], context=violation_cases.prompt_context(FLOOR))
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertFalse(any("synth.catalogue_reference_map" in c for c in commands))
+            self.assertIn("no image from Astra", row["error"])
+            prompt_text = (Path(folder) / "run" / "prompt.txt").read_text()
+            self.assertIn("floor hatch", prompt_text)
+            self.assertNotIn("{lid_pose}", prompt_text)
+
+    def test_the_hatch_cover_gets_a_random_angle_per_output_fixed_by_its_seed(self) -> None:
+        text = violation_cases.change(FLOOR, "open_no_person", "floor-closed")
+        self.assertIn("{lid_pose}", text)
+        filled, choices = violation_cases.fill(text, 3)
+        self.assertNotIn("{lid_pose}", filled)
+        self.assertIn(f"about {choices['lid_angle']} degrees", filled)
+        self.assertEqual(violation_cases.fill(text, 3), (filled, choices))          # same task, same angle
+        angles = {violation_cases.fill(text, seed)[1]["lid_angle"] for seed in range(60)}
+        self.assertGreater(len(angles), 8)
+        self.assertTrue(min(angles) <= 35 and max(angles) >= 100)                   # from barely open to past upright
+        other = violation_cases.change(FLOOR, "open_with_person", "floor-closed")
+        self.assertNotEqual({violation_cases.fill(text, s)[1]["lid_angle"] for s in range(5)},
+                            {violation_cases.fill(other, s)[1]["lid_angle"] for s in range(5)})
+        lsp = violation_cases.change(PUSH, "push_2_lsp_cargo", "forklift-with-lsp-cargo")
+        self.assertEqual(violation_cases.fill(lsp, 3), (lsp, {}))
+
+    def test_the_warehouse_prompt_is_unchanged_by_engine_contexts(self) -> None:
+        from synth import try_astra_edit_batch as batch
+        with tempfile.TemporaryDirectory() as folder:
+            reference_map = Path(folder) / "reference_map.json"
+            reference_map.write_text(json.dumps({"SKID": {"variant": "skid_SK046-1"}}))
+            prompt = batch.reference_prompt(reference_map, "add one LSP")
+        self.assertIn("from a real CCTV camera in an air-cargo terminal warehouse:\n1. Full scene: the warehouse floor "
+                      "with", prompt)
+        self.assertIn("Do not change the camera angle, the floor, the red laser lines", prompt)
 
     def test_cases_only_take_their_engines_kinds(self) -> None:
         for engine_id, engine in violation_cases.ENGINES.items():

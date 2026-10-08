@@ -312,6 +312,25 @@
   .rebuild-form .err { color: var(--bad); font-size: 12px; }
   .rebuild-form button.go-small { border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer;
                                   background: var(--engine); color: var(--on-engine); font: 600 var(--step-0) var(--font-body); }
+  /* choosing outputs to rebuild together: a box on each card, a bar with the shared request at the bottom */
+  .shot { position: relative; }
+  .pick { position: absolute; top: 6px; left: 6px; display: grid; place-items: center; width: 30px; height: 30px;
+          border-radius: 6px; background: rgba(11, 15, 21, .55); cursor: pointer; }
+  .pick input { width: 17px; height: 17px; margin: 0; cursor: pointer; accent-color: var(--engine); }
+  .card.picked { box-shadow: 0 0 0 2px var(--engine); }
+  .pick-bar { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 14px); transform: translateX(-50%);
+              width: min(760px, calc(100vw - 32px)); z-index: 4; display: grid; gap: 8px; padding: 12px 14px;
+              background: var(--surface); border: 1px solid var(--rule); border-top: 3px solid var(--engine);
+              border-radius: var(--radius); box-shadow: 0 10px 30px rgba(0, 0, 0, .18); }
+  .pick-bar .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .pick-bar .count { font-weight: 600; margin-right: auto; font-variant-numeric: tabular-nums; }
+  .pick-bar textarea { width: 100%; min-height: 56px; resize: vertical; padding: 7px 9px; font: inherit; font-size: var(--step-0);
+                       color: var(--ink); background: var(--ground); border: 1px solid var(--rule); border-radius: 6px; }
+  .pick-bar .err { color: var(--bad); font-size: 12px; }
+  .pick-bar button.go-small { border: 0; border-radius: 6px; padding: 7px 14px; cursor: pointer;
+                              background: var(--engine); color: var(--on-engine); font: 600 var(--step-0) var(--font-body); }
+  .pick-bar button:disabled { opacity: .5; cursor: not-allowed; }
+  .pairs.picking { padding-bottom: 190px; }
   .tok { font-size: 12px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
   .spin { width: 22px; height: 22px; border-radius: 50%; border: 3px solid var(--rule); border-top-color: var(--run);
           animation: spin 1s linear infinite; }
@@ -443,10 +462,12 @@
             <label class="resume-failed" id="resumeFailedWrap" hidden><input type="checkbox" id="resumeFailed"> also retry failed</label>
             <span class="ctl" title="Review the outputs one by one">
               <select id="reviewSet" aria-label="Which outputs to review">
-                <option value="all">Review all</option><option value="good">Review good</option><option value="bad">Review bad</option>
+                <option value="all">Review all</option><option value="unreviewed">Review unreviewed</option>
+                <option value="good">Review good</option><option value="bad">Review bad</option>
               </select>
               <button type="button" id="reviewBtn" class="btn-quiet review">Review</button>
             </span>
+            <button type="button" id="pickShown" class="btn-quiet" title="Choose every output shown by the filter below, to rebuild them with one request">Select shown</button>
             <span class="ctl" title="Download the outputs as a zip">
               <select id="dlFilter" aria-label="Which outputs to download">
                 <option value="all">All outputs</option><option value="good">Good only</option><option value="bad">Bad only</option>
@@ -470,6 +491,16 @@
         <div class="pairs-head"><div>Input frame</div><div>Outputs made from it</div></div>
         <div id="pairRows"></div>
       </div>
+      <form class="pick-bar" id="pickBar" autocomplete="off" novalidate hidden aria-label="Rebuild the chosen outputs">
+        <div class="row"><span class="count" id="pickCount"></span>
+          <button type="button" class="btn-quiet" id="pickClear">Clear</button></div>
+        <label class="field" for="pickNote" style="margin:0">One request for all of them: what should change?</label>
+        <textarea id="pickNote" maxlength="1000" placeholder="e.g. the new LSP must touch the loaded one with no gap, same size and thickness"></textarea>
+        <div class="err" id="pickErr" hidden></div>
+        <div class="row" style="justify-content:flex-end">
+          <button type="button" class="btn-quiet" id="pickForce" hidden>Run anyway</button>
+          <button type="submit" class="go-small" id="pickGo">Rebuild</button></div>
+      </form>
     </section>
   </div>
 </main>
@@ -518,6 +549,7 @@ const kTok = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${Math.r
 const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
 let kinds = [], engines = [], perOutput = null, mode = "folder", uploads = {}, zipFile = null;
 let job = null, socket = null, closedByUs = false, filter = "all", checkTimer = null, checkSeq = 0;
+let picked = new Set();     // ids of the outputs chosen to rebuild together
 let codex = null, fit = null, plannedOutputs = null;
 
 // ---------- Codex plan usage ----------
@@ -806,7 +838,7 @@ async function openJobById(id) {
 }
 function closeJob() {
   if (socket) { closedByUs = true; socket.close(); socket = null; }
-  job = null;
+  job = null; picked = new Set(); $("#pickBar").hidden = true;
   try { history.replaceState(null, "", location.pathname); } catch (_) {}
   $("#start").hidden = false; $("#summary").hidden = true; $("#pairs").hidden = true;
   loadHistory();
@@ -819,6 +851,7 @@ window.addEventListener("hashchange", () => {
 
 // ---------- job ----------
 function openJob(state) {
+  if (!job || job.id !== state.id) picked = new Set();
   job = state; filter = "all";
   try { if (location.hash !== `#job=${job.id}`) history.pushState(null, "", `#job=${job.id}`); } catch (_) {}
   const pick = $("#jobPick"); if (pick) pick.value = job.id;
@@ -949,6 +982,7 @@ function renderSummary() {
   const set = $("#reviewSet").value, queueSize = reviewQueue(set).length;
   $("#reviewBtn").disabled = !queueSize;
   $("#reviewBtn").textContent = queueSize ? `Review ${fmt(queueSize)}` : "Review";
+  renderPickBar();
   const notes = $("#notes");
   notes.hidden = !(job.notes && job.notes.length);
   notes.innerHTML = (job.notes || []).map((n) => `<li>${esc(n)}</li>`).join("");
@@ -982,6 +1016,7 @@ function reviewQueue(set) {
   const done = job.tasks.filter((t) => t.status === "done" && !isExcluded(t));
   if (set === "good") return done.filter((t) => t.review === "good");
   if (set === "bad") return done.filter((t) => t.review === "bad");
+  if (set === "unreviewed") return done.filter((t) => !t.review);           // e.g. the outputs of a rebuild
   return [...done.filter((t) => !t.review), ...done.filter((t) => t.review)];   // unreviewed first
 }
 let deck = null;     // { queue: [task ids], at, set }
@@ -1127,21 +1162,26 @@ function applyFilter() {
 }
 function card(t) {
   const el = document.createElement("article");
-  el.className = `card ${t.status} ${t.status === "done" ? (t.review ? `rv-${t.review}` : "rv-none") : ""}`; el.id = `card-${t.id}`;
+  el.className = ["card", ...cardClasses(t), picked.has(t.id) ? "picked" : ""].filter(Boolean).join(" ");
+  el.id = `card-${t.id}`;
   const shot = t.status === "done" ? `<img src="${esc(t.thumb || t.url)}" alt="${esc(t.case_title)} from ${esc(t.input)}" loading="lazy">`
     : t.status === "running" ? `<div class="spin" role="img" aria-label="Running"></div>`
     : t.status === "queued" ? "Waiting for a free thread" : "No output";
-  el.innerHTML = `<div class="shot">${shot}</div>
+  const pick = canRebuild(t) ? `<label class="pick" title="Choose for a rebuild with one request"><input type="checkbox" data-pick
+    aria-label="Choose ${esc(t.case_title)} v${t.variant} from ${esc(t.input)}" ${picked.has(t.id) ? "checked" : ""}></label>` : "";
+  el.innerHTML = `<div class="shot">${shot}${pick}</div>
     <div class="card-body"><div class="card-title">${esc(t.case_title)} <span class="mono">v${t.variant}${t.rebuild_round ? ` · rebuild ${t.rebuild_round}` : ""}</span></div>
       ${t.note ? `<div class="rebuild-note"><b>Request:</b> ${esc(t.note)}</div>` : ""}
       ${t.status === "failed" || t.status === "interrupted" ? `<div class="card-error">${esc(t.error || "No output")}</div>` : ""}</div>
     <div class="card-foot"><span class="chip ${t.status}">${LABEL[t.status]}${t.seconds ? ` · ${t.seconds} s` : ""}</span>
       ${t.review ? `<span class="rv-chip ${t.review}">${t.review}</span>` : ""}
       ${t.token_usage ? `<span class="tok">${tokenBreakdown(t.token_usage)}</span>` : ""}
-      ${["done", "failed", "interrupted"].includes(t.status) ? `<button type="button" class="btn-quiet" data-rebuild>Rebuild</button>` : ""}
+      ${canRebuild(t) ? `<button type="button" class="btn-quiet" data-rebuild>Rebuild</button>` : ""}
       ${t.status === "done" ? `<a class="btn" href="${esc(t.url)}" download="${esc(t.output_name)}">Download</a>` : ""}</div>`;
   const rb = el.querySelector("[data-rebuild]");
   if (rb) rb.addEventListener("click", () => openRebuild(el, t));
+  const box = el.querySelector("[data-pick]");
+  if (box) box.addEventListener("change", () => setPicked([t.id], box.checked));
   const img = el.querySelector("img");
   if (img) img.addEventListener("click", () => view(t.url, `${t.case_title} v${t.variant} · ${t.input_kind}/${t.input}`, t.output_name));
   return el;
@@ -1183,6 +1223,63 @@ function openRebuild(el, t) {
   force.addEventListener("click", () => send(true));
   form.querySelector("[data-cancel]").addEventListener("click", () => form.remove());
 }
+// rebuild many: choose outputs (a box on each card, or every output the filter shows), write one request, rebuild them all
+function canRebuild(t) { return ["done", "failed", "interrupted"].includes(t.status); }
+function setPicked(ids, on) {
+  ids.forEach((id) => on ? picked.add(id) : picked.delete(id));
+  ids.forEach((id) => {
+    const el = document.getElementById(`card-${id}`);
+    if (!el) return;
+    el.classList.toggle("picked", on);
+    const box = el.querySelector("[data-pick]"); if (box) box.checked = on;
+  });
+  renderPickBar();
+}
+function shownRebuildable() {
+  return job.tasks.filter((t) => canRebuild(t) && (filter === "all" || cardClasses(t).includes(filter)));
+}
+function cardClasses(t) { return [t.status, t.status === "done" ? (t.review ? `rv-${t.review}` : "rv-none") : ""]; }
+function renderPickBar() {
+  if (!job) return;
+  picked = new Set([...picked].filter((id) => { const t = taskById(id); return t && canRebuild(t); }));
+  const n = picked.size, shown = shownRebuildable();
+  $("#pickShown").disabled = !shown.length || shown.every((t) => picked.has(t.id));
+  $("#pickShown").textContent = shown.length ? `Select ${fmt(shown.length)} shown` : "Select shown";
+  $("#pickBar").hidden = !n;
+  $("#pairs").classList.toggle("picking", n > 0);
+  $("#pickCount").textContent = `${plural(n, "output")} chosen`;
+  $("#pickGo").textContent = n ? `Rebuild ${plural(n, "output")}` : "Rebuild";
+}
+async function rebuildPicked(forced) {
+  const note = $("#pickNote").value.trim(), err = $("#pickErr"), ids = [...picked];
+  err.hidden = true; $("#pickForce").hidden = true;
+  if (!ids.length) return;
+  if (!note) { err.textContent = "Write what to change in these images."; err.hidden = false; $("#pickNote").focus(); return; }
+  const data = new FormData();
+  ids.forEach((id) => data.append("task", id));
+  data.append("note", note);
+  if (forced) data.append("force", "1");
+  $("#pickBar").querySelectorAll("button").forEach((b) => b.disabled = true);
+  try {
+    const res = await fetch(`/api/jobs/${job.id}/rebuild`, { method: "POST", body: data });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 409 && body.detail && body.detail.codex) {
+      err.textContent = body.detail.message; err.hidden = false; $("#pickForce").hidden = false; return;
+    }
+    if (!res.ok) throw new Error(detail(body) || `The service answered ${res.status}.`);
+    picked = new Set(); $("#pickNote").value = "";
+    $("#reviewSet").value = "unreviewed";            // the rebuilt outputs join the unreviewed ones
+    job = body.job; renderJob(); loadCodex();
+  } catch (ex) {
+    err.textContent = String(ex.message || ex); err.hidden = false;
+  } finally { $("#pickBar").querySelectorAll("button").forEach((b) => b.disabled = false); renderPickBar(); }
+}
+$("#pickShown").addEventListener("click", () => setPicked(shownRebuildable().map((t) => t.id), true));
+$("#pickClear").addEventListener("click", () => setPicked([...picked], false));
+$("#pickBar").addEventListener("submit", (e) => { e.preventDefault(); rebuildPicked(false); });
+$("#pickForce").addEventListener("click", () => rebuildPicked(true));
+$("#pickNote").addEventListener("input", () => { $("#pickErr").hidden = true; });
+
 function view(url, caption, name) {
   $("#viewer img").src = url; $("#viewer img").alt = caption;
   $("#viewerCap").textContent = caption;

@@ -35,7 +35,8 @@ from PIL import Image
 from synth.token_usage import read_usage, summarize
 
 from synth.try_astra_edit import ROOT
-from synth.violation_cases import DEFAULT_CASE, DEFAULT_ENGINE, DEFAULT_INPUT, ENGINES, INPUT_KINDS, case, change
+from synth.violation_cases import (DEFAULT_CASE, DEFAULT_ENGINE, DEFAULT_INPUT, ENGINES, INPUT_KINDS, case, change,
+                                   fill, prompt_context)
 
 SCENE = INPUT_KINDS[DEFAULT_INPUT]["scene"]
 # the catalogue kinds (work/catalogue3d/variants.json "object"), described as in work/catalogue3d/README.md
@@ -47,6 +48,9 @@ KINDS = {
 # the LSP stand-in: one fixed grid of real CCTV crops of single empty LSPs (cam ch10, many pushed by a forklift's
 # forks), used only when the frame shows no LSP; the SKID is the catalogue render for the frame
 LSP_REFERENCE = ROOT / "work/ref-lsp.jpg"
+# the floor-opening reference: two frames of the user's clip side by side, the hatch closed (left) and open (right)
+FLOOR_OPENING_REFERENCE = ROOT / "work/floor-opening/ref-floor-opening.jpg"
+FIXED_REFERENCES = {"LSP": LSP_REFERENCE, "FLOOR_OPENING": FLOOR_OPENING_REFERENCE}
 REFERENCE_TEXT = {
     "LSP": ("An LSP (load spreader plate) reference, to use ONLY when image 1 shows no LSP: a grid of real CCTV "
             "crops of single, empty LSPs of this warehouse, many of them being pushed by a forklift's forks. Every "
@@ -56,6 +60,12 @@ REFERENCE_TEXT = {
     "SKID": ("A skid: {skid}. It is a 3D render of a real skid of this warehouse: the large tile is the main view, "
              "the small tiles are other views of the SAME skid. Copy only its appearance (colour, material, texture); "
              "it is not to scale, and neither its size nor its viewpoint may be copied."),
+    "FLOOR_OPENING": ("A floor hatch reference: two frames of another real CCTV camera, side by side. On the LEFT the "
+                      "hatch is CLOSED (its cover flush with the floor in its metal frame); on the RIGHT the same hatch "
+                      "is OPEN (its cover hinged up and standing at the far edge, the dark pit below it showing). Copy "
+                      "only how an open hatch looks: the raised cover and its underside, the dark hole and its frame "
+                      "edge; the cover's angle there is only one example, the change below gives the angle to use. Never copy that room, its seats, its person, its timestamp, camera name or any text, and "
+                      "take no size, position or viewpoint from it."),
 }
 # what the warehouse objects are, so Astra does not take an LSP for a pallet or size it by its load (sizes:
 # config/standards.json and work/catalogue3d/README.md)
@@ -69,19 +79,24 @@ OBJECTS = """What the objects are:
 - Cargo: the load on a skid, about the skid's footprint and roughly 0.8-1.6 m tall: carton stacks, loads wrapped in
   clear or black film, crates.
 - From the floor up: LSP, then skid, then cargo."""
-PROMPT = """You are given {count} reference images from a real CCTV camera in an air-cargo terminal warehouse:
-1. Full scene: the warehouse floor with {scene}.
+PROMPT = """You are given {count} reference images from {setting}:
+1. Full scene: {scene_prefix}{scene}.
 {references}
 
 {objects}
 
 Edit image 1 only. Keep the SAME fixed high-angle CCTV viewpoint, lighting, colors and image quality (slightly blurry
-wide-angle security-camera look). Do not change the camera angle, the floor, the red laser lines, the background,
-the other objects or the people. Keep the full frame size and aspect ratio.
+wide-angle security-camera look). {keep} Keep the full frame size and aspect ratio.
 
 Make this ONE change: {change}
 
 Everything else stays exactly as in image 1. No labels, bounding boxes, text or watermarks."""
+# the warehouse engines' prompt context; an engine may give its own (synth.violation_cases.prompt_context)
+WAREHOUSE = {"setting": "a real CCTV camera in an air-cargo terminal warehouse",
+             "scene_prefix": "the warehouse floor with ", "objects": OBJECTS,
+             "keep": "Do not change the camera angle, the floor, the red laser lines, the background,\nthe other objects "
+                     "or the people."}
+CATALOGUE_REFS = {"SKID"}       # references rendered per frame by synth.catalogue_reference_map
 IMAGE_TYPES = (".jpg", ".jpeg", ".png")
 
 
@@ -97,22 +112,28 @@ def frames(paths: list[Path]) -> list[Path]:
     return [p.resolve() for p in found]
 
 
-def reference_prompt(reference_map: Path, change: str, scene: str = SCENE, refs=("LSP", "SKID")) -> str:
+def reference_prompt(reference_map: Path | None, change: str, scene: str = SCENE, refs=("LSP", "SKID"),
+                     context: dict | None = None) -> str:
     """The prompt for one frame: the references (images 2, 3, ...) named by their catalogue kind, then the ONE
-    change."""
-    entries = json.loads(reference_map.read_text())
-    variants = json.loads((ROOT / "work/catalogue3d/variants.json").read_text())
-    skid = KINDS[variants[entries["SKID"]["variant"]]["object"]] if "SKID" in refs else ""
+    change. reference_map is only read when a catalogue render (SKID) goes in; context is the engine's setting,
+    objects and keep rules (default: the warehouse)."""
+    skid = ""
+    if "SKID" in refs:
+        entries = json.loads(reference_map.read_text())
+        variants = json.loads((ROOT / "work/catalogue3d/variants.json").read_text())
+        skid = KINDS[variants[entries["SKID"]["variant"]]["object"]]
     references = "\n".join(f"{i}. {REFERENCE_TEXT[ref].format(skid=skid)}" for i, ref in enumerate(refs, 2))
-    return PROMPT.format(count=len(refs) + 1, scene=scene, references=references, objects=OBJECTS, change=change)
+    return PROMPT.format(count=len(refs) + 1, scene=scene, references=references, change=change,
+                         **{**WAREHOUSE, **(context or {})})
 
 
 def reference_image(ref: str, run: Path) -> Path:
-    """The image file of one reference: the fixed LSP crop sheet, or the frame's catalogue render (run/refs/)."""
-    if ref == "LSP":
-        if not LSP_REFERENCE.is_file():
-            raise RuntimeError(f"the LSP reference is missing: {LSP_REFERENCE}")
-        return LSP_REFERENCE
+    """The image file of one reference: a fixed sheet (LSP crops, floor hatch frames), or the frame's catalogue
+    render (run/refs/)."""
+    if ref in FIXED_REFERENCES:
+        if not FIXED_REFERENCES[ref].is_file():
+            raise RuntimeError(f"the {ref} reference is missing: {FIXED_REFERENCES[ref]}")
+        return FIXED_REFERENCES[ref]
     return run / "refs" / f"{ref}.png"
 
 
@@ -138,7 +159,7 @@ def tokens_used(log: Path) -> int | None:
 
 
 def edit_frame(image: Path, run: Path, output: Path, seed: int, change: str, scene: str = SCENE,
-               codex_bin: str = "codex", refs=("LSP", "SKID")) -> dict:
+               codex_bin: str = "codex", refs=("LSP", "SKID"), context: dict | None = None) -> dict:
     """One Astra edit of one frame: the catalogue references in refs (seed picks the models) into run/, the edited
     frame at its own size to output. Returns its result row (output or error, seconds, the tokens Astra reported);
     never raises."""
@@ -147,12 +168,15 @@ def edit_frame(image: Path, run: Path, output: Path, seed: int, change: str, sce
         shutil.rmtree(run)
     run.mkdir(parents=True)
     row = {"input": str(image), "seed": seed}
+    change, choices = fill(change, seed)       # per-output choices, e.g. the floor hatch cover's angle
+    row.update(choices)
     try:
-        command = [sys.executable, "-m", "synth.catalogue_reference_map", "--image", str(camera_sized(image, run)),
-                   "--seed", str(seed), "--out", str(run / "refs")]
-        subprocess.run(command, cwd=ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if CATALOGUE_REFS & set(refs):
+            command = [sys.executable, "-m", "synth.catalogue_reference_map", "--image",
+                       str(camera_sized(image, run)), "--seed", str(seed), "--out", str(run / "refs")]
+            subprocess.run(command, cwd=ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         images = [image] + [reference_image(ref, run) for ref in refs]
-        prompt = reference_prompt(run / "refs" / "reference_map.json", change, scene, refs)
+        prompt = reference_prompt(run / "refs" / "reference_map.json", change, scene, refs, context)
         (run / "prompt.txt").write_text(prompt)
         raw = run / "raw.png"
         command = [codex_bin, "exec", "--json", "--ephemeral", "-m", "gpt-6-astra", "-s", "workspace-write", "-C", str(ROOT)]
@@ -188,7 +212,7 @@ def edit_frame(image: Path, run: Path, output: Path, seed: int, change: str, sce
 def edit(image: Path, seed: int, args: argparse.Namespace, out: Path) -> dict:
     """edit_frame for one frame of a batch, printing its result."""
     row = edit_frame(image, out / "runs" / image.stem, out / "outputs" / f"{image.stem}.png", seed, args.change_text,
-                     args.scene, args.codex_bin, args.refs)
+                     args.scene, args.codex_bin, args.refs, prompt_context(args.engine))
     print(f"{image.name}: " + (f"-> {row['output']}" if "output" in row else f"FAILED {row['error']}")
           + f" ({row['seconds']} s)", flush=True)
     return row

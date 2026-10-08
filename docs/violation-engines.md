@@ -56,6 +56,7 @@ that engine turns frames of the kinds it lists into its violation. Inputs are so
 | `forklift-with-lsp-empty` | a forklift pushing one empty LSP | `forklift-pushing-multiple-lsps` | V1, V2, V6 |
 | `forklift-with-cargo-no-lsp` | a forklift carrying a cargo load (on a SKID) on its forks, no LSP | `forklift-charging-multiple-skids-horizontally` | Carry 2 cargo side by side, Carry 2 cargo stacked |
 | `forklift-empty` | a forklift with empty forks | `forklift-charging-multiple-skids-horizontally` | Carry 2 cargo side by side, Carry 2 cargo stacked |
+| `floor-closed` | a floor hatch with its cover closed, flush with the floor | `floor-opening` | Open with person, Open no person, Open main door closed, Open main door open |
 
 A folder of inputs holds these kind folders (any of them), each with its .jpg / .png frames (sub-folders inside a
 kind folder are searched too); a zip holds the same folders, at its top or inside one folder:
@@ -115,6 +116,40 @@ Multiple Lsps").
 | Carry 2 cargo side by side (`carry_2_skids_side_by_side`) | none (draft) | two cargo loads, each on its own SKID, side by side across the fork carriage; each SKID turned lengthwise along the forks (its long side parallel to the tines). From `forklift-with-cargo-no-lsp` the carried load gets a SKID if none shows, and a second loaded SKID goes beside it. Every load sits all the way back against the forklift's vertical mast. Only the SKID reference goes in | draft after the user's first example prompt; placement rules from the user (2026-10-06) |
 | Carry 2 cargo stacked (`carry_2_cargo_stacked`) | none (draft) | two cargo loads on SKIDs stacked one on top of the other, each turned crosswise (its long side across both tines); the upper SKID sits squarely on the lower load, both about the same footprint. From `forklift-with-cargo-no-lsp` the carried load is the lower one, turned crosswise if it lies otherwise. Every load sits all the way back against the forklift's vertical mast. Only the SKID reference goes in | draft (user, 2026-10-06); first outputs 2026-10-06 (before the orientation and mast rules); to confirm that a vertical stack counts for an engine named "horizontally" |
 
+## `floor-opening`
+
+A floor hatch is left open: its cover is lifted and the floor opening below shows (user, 2026-10-08). One input
+kind, `floor-closed` (the hatch closed). Target camera: CMW01 channel 54 (`rtsp://<user>:<pass>@192.168.137.23/cam/realmonitor?channel=54&subtype=0`).
+The engine colour `#d4570f` is ours until the engine configuration gives one.
+
+| Case | How | Status |
+|---|---|---|
+| Open, person in scene (`open_with_person`) | the hatch open; the people of the frame stay, one worker is added beside the hatch when the frame shows nobody | draft |
+| Open, nobody in scene (`open_no_person`) | the hatch open; every person removed, the hatch left unattended | draft |
+| Open, main door closed (`open_main_door_closed`) | the hatch open; the room's main door shut (closed if the frame shows it open); people unchanged | draft |
+| Open, main door open (`open_main_door_open`) | the hatch open; the main door wide open, light from beyond it; people unchanged | draft |
+
+The hatch cover's angle is random per output (user, 2026-10-08: not only upright): `fill()` in
+`synth/violation_cases.py` draws a pose from the task's seed and its change text (so the four cases of one frame
+differ, a rerun keeps its angle, a rebuild gets a new one): slightly open (20-35 degrees, the pit only a wedge under
+the cover), half open (40-60), mostly open (65-80), upright (85-95) or flung back past upright (100-120). `edit_frame`
+fills it, records `lid_angle` in its result row, and the angle is in each run's `prompt.txt`.
+
+Every case takes one reference, `work/floor-opening/ref-floor-opening.jpg`: two frames of the user's clip
+(Drive file `1N7hGHcvkBSuYJmdkv7d71Paeal73WLm0`, CMW01 G02-CAM00, 960x540) side by side, the hatch closed (0.2 s) and
+open (6.5 s); the prompt copies only how an open hatch looks, never that room, its person or its text. Rebuilt with:
+
+```
+ffmpeg -ss 0.2 -i ref-video.mp4 -frames:v 1 closed.png; ffmpeg -ss 6.5 -i ref-video.mp4 -frames:v 1 open.png
+ffmpeg -i closed.png -i open.png -filter_complex "[0][1]hstack=inputs=2" work/floor-opening/ref-floor-opening.jpg
+```
+
+The engine has its own prompt context (`prompt` in `synth/violation_cases.py`: setting, what a floor hatch, floor
+opening and main door are, what stays unchanged, the camera's timestamp kept), so its prompt names no warehouse, LSP
+or laser line, and no catalogue3d render is made for it (`edit_frame` runs `synth.catalogue_reference_map` only for a
+SKID reference). Inputs from the camera: `python -m synth.grab_rtsp_frames "<rtsp url>" --kind floor-closed
+--count 10 --every 20 --out work/inputs/cmw01-ch54` (10 frames, 20 s apart).
+
 ## Generation service
 
 `service/app.py` (FastAPI) with its page `service/static/index.html`:
@@ -170,8 +205,15 @@ with". The earlier output stays; the new one is a task of the same job, shown be
 the rounds from the first output. It takes the same Codex usage check as a job (one output; "Run anyway" passes
 `force=1`).
 
+Rebuild many (`POST /api/jobs/<job id>/rebuild`, form fields `task` repeated once per output, `note`, `force`): the
+same rebuild for each chosen output, all with one request, e.g. the reviewer's feedback on every bad output. On the
+page, a box on each finished, failed or interrupted card chooses it, and "Select shown" chooses every such output the
+filter shows (Bad, Unreviewed, Failed, ...); a bar at the bottom takes the request. The usage check counts all the
+outputs, and nothing is added when one of the choices is unknown or still being made. After it, the review menu
+switches to Review unreviewed, where the new outputs wait.
+
 Review (the Review button on a job): a full-screen deck of the job's finished outputs, chosen as Review all (unreviewed
-first), Review good or Review bad. The output fills the screen, its input frame sits top left. Right arrow / swipe
+first), Review unreviewed (only outputs with no mark yet, such as new rebuilds), Review good or Review bad. The output fills the screen, its input frame sits top left. Right arrow / swipe
 right / Good marks it good and moves on, left / Bad marks it bad, up and down move without marking, X / "Exclude input"
 takes that input frame (and all its outputs) out of review and downloads, with an Undo. Marks are stored per output
 (`review` in `job.json`, `POST /api/jobs/<id>/tasks/<task id>/review`, verdict good|bad|clear); excluded frames as

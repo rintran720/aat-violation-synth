@@ -9,6 +9,8 @@ per input kind it takes, and `refs` the catalogue references that go in after th
 it counts as a violation is still to confirm; draft: a case of ours, not in the catalogue yet).
 """
 
+import random
+
 INPUT_KINDS = {
     "forklift-with-lsp-cargo": {
         "title": "Forklift with LSP and cargo",
@@ -29,6 +31,11 @@ INPUT_KINDS = {
         "title": "Forklift with empty forks",
         "scene": "a counterbalance forklift with EMPTY forks (nothing on them)",
         "engine": "forklift-charging-multiple-skids-horizontally",
+    },
+    "floor-closed": {
+        "title": "Floor hatch closed",
+        "scene": "a floor hatch that is CLOSED: its cover lies flat and flush with the floor inside its frame",
+        "engine": "floor-opening",
     },
 }
 
@@ -248,7 +255,132 @@ ENGINES = {
         },
     },
 }
-DEFAULT_ENGINE, DEFAULT_CASE, DEFAULT_INPUT = "forklift-pushing-multiple-lsps", "push_2_lsp_cargo", "forklift-with-lsp-cargo"
+
+# floor-opening (user, 2026-10-08): a floor hatch left open; reference: work/floor-opening/ref-floor-opening.jpg, two
+# frames of the user's clip (left closed, right open), made by docs/violation-engines.md#floor-opening
+FLOOR_SETTING = "a real CCTV camera overlooking a room or cabin floor with a floor hatch"
+FLOOR_OBJECTS = """What the objects are:
+- Floor hatch: a square or rectangular access cover set into the floor, flush with it inside a thin metal frame (often
+  aluminium or steel trim), usually with small recessed lifting rings or handles on its top. It is hinged along one
+  edge of its frame.
+- Floor opening: the hole under the hatch. When the hatch is OPEN its cover is lifted on its hinge and stands upright
+  (or leans slightly back) along that edge, its underside (bare, stained or rusty metal) showing; where the cover lay
+  is a dark rectangular pit going down below the floor, exactly the size of the frame, its inner walls, the frame's
+  edge and maybe the top of a ladder or pipes faintly seen in the dark.
+- Main door: the room's main entrance door, the largest door of the room that leads out of it (to a corridor, a deck
+  or outside)."""
+FLOOR_KEEP = ("Do not change the camera angle, the walls, the seats and furniture, the background or the other objects. "
+              "Keep the camera's own on-screen timestamp and camera name exactly as they are in image 1.")
+# the cover's angle varies per output (user, 2026-10-08: not only upright): {lid_pose} is filled per task by fill()
+OPEN_HATCH = ("the floor hatch, closed in image 1, is now OPEN: its cover is lifted on its hinge along the frame edge "
+              "farthest from the camera (or the edge where image 1 shows the hinges), and the cover is {lid_pose}. "
+              "Use exactly this angle, not the upright pose of image 2. Where the cover lay there is now the open floor "
+              "opening, a dark rectangular pit going down below the floor, as in the right half of image 2. The pit is "
+              "exactly the size, shape and position of the hatch frame in image 1, seen in the same perspective, never "
+              "larger or smaller, and the metal frame around it stays where it was. The raised cover is as big as the "
+              "hole it came from and stays attached to the frame at its hinge edge. ")
+# (lowest angle, highest angle, how the cover looks); the angle is between the cover and the floor
+LID_POSES = [
+    (20, 35, "only slightly open, tilted up about {angle} degrees from the floor: its free edge, the one nearest the "
+             "camera, is lifted just a little above the floor, so the cover still hides most of the hole and the dark "
+             "pit shows only as a low wedge-shaped gap between its lifted edge and the frame"),
+    (40, 60, "half open, tilted up about {angle} degrees from the floor: it leans out over the hole at a slant, its "
+             "underside partly visible, and the dark pit shows under and in front of it"),
+    (65, 80, "mostly open, raised about {angle} degrees from the floor: nearly upright but still leaning a little "
+             "over the hole, its underside showing"),
+    (85, 95, "fully open and standing upright on its hinge edge, at about {angle} degrees from the floor, its "
+             "underside facing the camera"),
+    (100, 120, "flung all the way open past upright, to about {angle} degrees: it leans back away from the hole, its "
+               "top resting against whatever is behind it (the wall, a seat or the floor), its underside facing up "
+               "towards the camera, the whole hole uncovered"),
+]
+
+
+def lid_pose(rng: random.Random) -> tuple[int, str]:
+    """A random cover angle (a pose band, then a multiple of 5 degrees in it) and its words for the prompt."""
+    low, high, words = rng.choice(LID_POSES)
+    angle = rng.randrange(low, high + 1, 5)
+    return angle, words.format(angle=angle)
+
+
+def fill(change: str, seed: int) -> tuple[str, dict]:
+    """The change with its per-output choices made: {lid_pose} becomes a cover angle drawn from the seed and the change
+    text (so the cases of one frame differ, and the same task always gets the same angle). Returns the text and the
+    choices made ({} when the change has none)."""
+    if "{lid_pose}" not in change:
+        return change, {}
+    angle, words = lid_pose(random.Random(f"{seed}|{change}"))
+    return change.replace("{lid_pose}", words), {"lid_angle": angle}
+NO_NEW_PEOPLE = "Nobody new is added and nobody is removed: the people stay exactly as in image 1. "
+FLOOR_LOOK = ("The open hatch must be clearly visible and unmistakable as an open floor opening, with the same lighting, "
+              "blur and noise as the rest of the frame.")
+
+ENGINES["floor-opening"] = {
+    "name": "Floor Opening",
+    "color": "#d4570f",
+    "prompt": {"setting": FLOOR_SETTING, "scene_prefix": "the floor with ", "objects": FLOOR_OBJECTS,
+               "keep": FLOOR_KEEP},
+    "cases": {
+        "open_with_person": {
+            "title": "Open, person in scene",
+            "catalogue": "-",
+            "status": "draft",
+            "refs": ["FLOOR_OPENING"],
+            "changes": {
+                "floor-closed": (
+                    f"{OPEN_HATCH}At least one person is in the scene: keep every person already in image 1; if "
+                    "image 1 shows nobody, add one adult worker or crew member in ordinary work clothes standing or "
+                    "crouching on the floor right next to the open hatch (for example holding the raised cover), at "
+                    "the right size for that spot, never standing over the hole, with the same CCTV blur and lighting. "
+                    f"{FLOOR_LOOK}"),
+            },
+        },
+        "open_no_person": {
+            "title": "Open, nobody in scene",
+            "catalogue": "-",
+            "status": "draft",
+            "refs": ["FLOOR_OPENING"],
+            "changes": {
+                "floor-closed": (
+                    f"{OPEN_HATCH}Nobody is in the scene: remove every person and their shadows from image 1 and fill "
+                    "in what was behind them as the room would look empty (the floor, seats and walls continue); add "
+                    f"no one. The open hatch is left unattended. {FLOOR_LOOK}"),
+            },
+        },
+        "open_main_door_closed": {
+            "title": "Open, main door closed",
+            "catalogue": "-",
+            "status": "draft",
+            "refs": ["FLOOR_OPENING"],
+            "changes": {
+                "floor-closed": (
+                    f"{OPEN_HATCH}The room's main door is CLOSED: fully shut and flush in its frame, nothing seen "
+                    "through it; if image 1 shows it open, close it, and if it is already closed leave it as it is. "
+                    f"{NO_NEW_PEOPLE}{FLOOR_LOOK}"),
+            },
+        },
+        "open_main_door_open": {
+            "title": "Open, main door open",
+            "catalogue": "-",
+            "status": "draft",
+            "refs": ["FLOOR_OPENING"],
+            "changes": {
+                "floor-closed": (
+                    f"{OPEN_HATCH}The room's main door is OPEN: swung (or slid) wide open in its frame, showing what "
+                    "lies beyond it (a corridor, a deck or daylight outside) with natural light coming through; if "
+                    f"image 1 shows it open already, keep it open. {NO_NEW_PEOPLE}{FLOOR_LOOK}"),
+            },
+        },
+    },
+}
+
+
+def prompt_context(engine: str) -> dict | None:
+    """The engine's own setting, object notes and keep rules for the prompt; None means the warehouse defaults."""
+    return ENGINES[engine].get("prompt")
+
+
+DEFAULT_ENGINE, DEFAULT_CASE, DEFAULT_INPUT ="forklift-pushing-multiple-lsps", "push_2_lsp_cargo", "forklift-with-lsp-cargo"
 
 
 def case(engine: str, case_id: str) -> dict:

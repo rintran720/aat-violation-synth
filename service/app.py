@@ -49,7 +49,7 @@ from starlette.datastructures import UploadFile
 from service.codex_status import CodexUsage
 from synth.token_usage import legacy_usage, migrate_task, read_usage, summarize, update_task
 from synth.try_astra_edit_batch import IMAGE_TYPES, ROOT, edit_frame, frames
-from synth.violation_cases import ENGINES, INPUT_KINDS, catalogue
+from synth.violation_cases import ENGINES, INPUT_KINDS, catalogue, prompt_context
 
 JOBS_DIR = ROOT / "work/service/jobs"
 STATIC = Path(__file__).resolve().parent / "static"
@@ -297,7 +297,7 @@ def run_task(job: Job, task: dict) -> None:
     try:
         row = edit_frame(job.image(task), run,
                          job.folder / "outputs" / task["path"], task["seed"], change,
-                         INPUT_KINDS[kind]["scene"], refs=case["refs"])
+                         INPUT_KINDS[kind]["scene"], refs=case["refs"], context=prompt_context(job.engine))
     except Exception as error:            # edit_frame reports its own errors; this guards the pool
         row = {"error": f"{type(error).__name__}: {error}"}
     remember_tokens((row.get("token_usage") or legacy_usage(row.get("tokens"))).get("input_tokens"))
@@ -566,6 +566,61 @@ async def resume(job_id: str, request: Request) -> dict:
     return {"resumed": len(todo), "job": job.public()}
 
 
+def rebuild_note(form) -> str:
+    """The user's request for a rebuild, on one line: required, at most MAX_NOTE characters."""
+    note = " ".join(str(form.get("note", "")).split())
+    if not note:
+        raise HTTPException(400, "write what to change in this image")
+    if len(note) > MAX_NOTE:
+        raise HTTPException(400, f"the request is over {MAX_NOTE} characters")
+    return note
+
+
+def rebuild_sources(job: Job, task_ids: list[str]) -> list[dict]:
+    """The outputs to rebuild, in the order given: each must be a task of the job that is no longer being made."""
+    with job.lock:
+        by_id = {t["id"]: t for t in job.tasks}
+        missing = [task_id for task_id in task_ids if task_id not in by_id]
+        if missing:
+            raise HTTPException(404, f"no task {', '.join(missing)} in job {job.id}")
+        busy = [task_id for task_id in task_ids if by_id[task_id]["status"] in ("queued", "running")]
+        if busy:
+            raise HTTPException(409, f"still being made, rebuild once done: {', '.join(busy)}")
+        return [by_id[task_id] for task_id in task_ids]
+
+
+def new_rebuild_task(job: Job, source: dict, note: str) -> dict:
+    """One more task for the source's frame and case, appended to the job (the caller holds job.lock). Rounds count
+    from the first output, so a rebuild of a rebuild is ...__r2.png, ...__r3.png."""
+    origin = source.get("rebuild_of") or source["id"]
+    rounds = 1 + sum(t.get("rebuild_of") == origin for t in job.tasks)
+    stem = source["output_name"].removesuffix(".png").split("__r")[0]
+    name = f"{stem}__r{rounds}.png"
+    task = {"id": f"t{len(job.tasks) + 1:04d}", "input": source["input"], "input_kind": source["input_kind"],
+            "case": source["case"], "case_title": source["case_title"], "variant": source["variant"],
+            "seed": source["seed"] + 1000 * rounds, "status": "queued", "output_name": name,
+            "path": f"{source['input_kind']}/{name}", "rebuild_of": origin, "rebuild_round": rounds,
+            "rebuilt_from": source["id"], "note": note}
+    migrate_task(task)
+    job.tasks.append(task)
+    return task
+
+
+async def queue_rebuilds(job: Job, sources: list[dict], note: str, force: bool) -> list[dict]:
+    """Check the Codex room for len(sources) outputs (409 unless forced), then add and start one rebuild each."""
+    fit = await asyncio.to_thread(USAGE.check, len(sources), pending_outputs())
+    if not fit["fits"] and not force:
+        raise HTTPException(409, {"message": fit["reason"], "codex": fit})
+    with job.lock:
+        tasks = [new_rebuild_task(job, source, note) for source in sources]
+    job.loop = job.loop or asyncio.get_running_loop()
+    job.save()
+    job.notify({"type": "job", "job": job.public()})
+    for task in tasks:
+        executor.submit(run_task, job, task)
+    return [dict(task) for task in tasks]
+
+
 @app.post("/api/jobs/{job_id}/tasks/{task_id}/rebuild")
 async def rebuild(job_id: str, task_id: str, request: Request) -> dict:
     """One more output for the same frame and case, with the user's own request for that image added to the prompt.
@@ -573,37 +628,26 @@ async def rebuild(job_id: str, task_id: str, request: Request) -> dict:
     shared pool. Form fields: note (the request, required), force (to run past the Codex usage limit)."""
     job = get_job(job_id)
     form = await request.form()
-    note = " ".join(str(form.get("note", "")).split())
-    if not note:
-        raise HTTPException(400, "write what to change in this image")
-    if len(note) > MAX_NOTE:
-        raise HTTPException(400, f"the request is over {MAX_NOTE} characters")
-    with job.lock:
-        source = next((t for t in job.tasks if t["id"] == task_id), None)
-        if source is None:
-            raise HTTPException(404, f"no task {task_id} in job {job_id}")
-        if source["status"] in ("queued", "running"):
-            raise HTTPException(409, "this output is still being made; rebuild it once it is done")
-    fit = await asyncio.to_thread(USAGE.check, 1, pending_outputs())
-    if not fit["fits"] and str(form.get("force", "")) not in ("1", "true"):
-        raise HTTPException(409, {"message": fit["reason"], "codex": fit})
-    with job.lock:
-        origin = source.get("rebuild_of") or source["id"]
-        rounds = 1 + sum(t.get("rebuild_of") == origin for t in job.tasks)
-        stem = source["output_name"].removesuffix(".png").split("__r")[0]
-        name = f"{stem}__r{rounds}.png"
-        task = {"id": f"t{len(job.tasks) + 1:04d}", "input": source["input"], "input_kind": source["input_kind"],
-                "case": source["case"], "case_title": source["case_title"], "variant": source["variant"],
-                "seed": source["seed"] + 1000 * rounds, "status": "queued", "output_name": name,
-                "path": f"{source['input_kind']}/{name}", "rebuild_of": origin, "rebuild_round": rounds,
-                "rebuilt_from": source["id"], "note": note}
-        migrate_task(task)
-        job.tasks.append(task)
-    job.loop = job.loop or asyncio.get_running_loop()
-    job.save()
-    job.notify({"type": "job", "job": job.public()})
-    executor.submit(run_task, job, task)
-    return {"task": dict(task), "job": job.public()}
+    note = rebuild_note(form)
+    sources = rebuild_sources(job, [task_id])
+    tasks = await queue_rebuilds(job, sources, note, str(form.get("force", "")) in ("1", "true"))
+    return {"task": tasks[0], "job": job.public()}
+
+
+@app.post("/api/jobs/{job_id}/rebuild")
+async def rebuild_many(job_id: str, request: Request) -> dict:
+    """One more output for each chosen output, all with the same request (a reviewer's feedback on a set of outputs).
+    Each is a rebuild as above; nothing is added when any choice is refused. Form fields: task (one per chosen
+    output, repeated; a repeat is made once), note (required), force (to run past the Codex usage limit)."""
+    job = get_job(job_id)
+    form = await request.form()
+    note = rebuild_note(form)
+    task_ids = list(dict.fromkeys(str(value) for value in form.getlist("task")))
+    if not task_ids:
+        raise HTTPException(400, "choose at least one output to rebuild")
+    sources = rebuild_sources(job, task_ids)
+    tasks = await queue_rebuilds(job, sources, note, str(form.get("force", "")) in ("1", "true"))
+    return {"tasks": tasks, "job": job.public()}
 
 
 @app.get("/api/jobs/{job_id}")
