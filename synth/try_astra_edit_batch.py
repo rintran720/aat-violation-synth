@@ -23,7 +23,6 @@ is redone, and results.json keeps the earlier rows.
 """
 import argparse
 import json
-import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image
+from synth.token_usage import read_usage, summarize
 
 from synth.try_astra_edit import ROOT
 from synth.violation_cases import DEFAULT_CASE, DEFAULT_ENGINE, DEFAULT_INPUT, ENGINES, INPUT_KINDS, case, change
@@ -130,13 +130,11 @@ def camera_sized(image: Path, run: Path) -> Path:
 
 
 def tokens_used(log: Path) -> int | None:
-    """The tokens the Codex CLI reports for one run ("tokens used" then the count, at the end of its log): the
-    Astra session's prompt, input images and replies. What the imagegen tool itself costs is not in it."""
-    try:
-        found = re.findall(r"tokens used\s*\n\s*([\d,]+)", log.read_text(errors="ignore"))
-    except OSError:
+    """Known input + output; old scalar logs are input-only."""
+    usage = read_usage(log)
+    if usage.get("input_tokens") is None and usage.get("output_tokens") is None:
         return None
-    return int(found[-1].replace(",", "")) if found else None
+    return summarize([usage])["known_total_tokens"]
 
 
 def edit_frame(image: Path, run: Path, output: Path, seed: int, change: str, scene: str = SCENE,
@@ -157,7 +155,7 @@ def edit_frame(image: Path, run: Path, output: Path, seed: int, change: str, sce
         prompt = reference_prompt(run / "refs" / "reference_map.json", change, scene, refs)
         (run / "prompt.txt").write_text(prompt)
         raw = run / "raw.png"
-        command = [codex_bin, "exec", "--ephemeral", "-m", "gpt-6-astra", "-s", "workspace-write", "-C", str(ROOT)]
+        command = [codex_bin, "exec", "--json", "--ephemeral", "-m", "gpt-6-astra", "-s", "workspace-write", "-C", str(ROOT)]
         for path in images:
             command += ["-i", str(path)]
         command += ["-o", str(run / "astra.txt"),
@@ -167,6 +165,7 @@ def edit_frame(image: Path, run: Path, output: Path, seed: int, change: str, sce
                     "file or use Blender/3D compositing."]
         with (run / "astra.log").open("w") as log:
             code = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT).returncode
+        row["token_usage"] = read_usage(run / "astra.log")
         row["tokens"] = tokens_used(run / "astra.log")
         if code or not raw.is_file() or not raw.stat().st_size:
             raise RuntimeError(f"no image from Astra (codex exit {code}); see {run / 'astra.log'}")

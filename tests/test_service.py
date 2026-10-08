@@ -43,6 +43,8 @@ class ServiceTests(unittest.TestCase):
         self.running, self.peak, self.calls = 0, 0, []
         self.lock = threading.Lock()
         patches = [mock.patch.object(service, "JOBS_DIR", self.root / "jobs"),
+                   mock.patch.object(service, "load_token_history"),
+                   mock.patch.object(service, "_token_samples", []),
                    mock.patch.object(service, "edit_frame", side_effect=self.fake_edit),
                    mock.patch.dict(service.jobs, clear=True),
                    mock.patch.object(service, "USAGE", CodexUsage(self.root / "usage.json", service.service_totals,
@@ -283,6 +285,38 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(retry["resumed"], 2)
         self.wait_finished(job["id"])
         self.assertEqual(self.client.post(f"/api/jobs/{job['id']}/resume").status_code, 400)   # nothing left
+
+    def test_retry_accumulates_structured_usage_and_survives_reload(self):
+        job = self.create().json()
+        first = self.wait_finished(job["id"])
+        with mock.patch.object(service, "edit_frame", return_value={"error": "failed again", "seconds": 1,
+                "tokens": 120, "token_usage": {"input_tokens": 100, "cached_input_tokens": 80,
+                "output_tokens": 20, "reasoning_output_tokens": 10, "source": "codex_json"}}):
+            self.client.post(f"/api/jobs/{job['id']}/resume", data={"failed": "1"})
+            final = self.wait_finished(job["id"])
+        self.assertEqual(final["tokens"]["used"], first["tokens"]["used"] + 240)
+        self.assertEqual(final["tokens"]["output_tokens"], 40)
+        self.assertEqual(final["tokens"]["cached_input_tokens"], 160)
+        failed = next(t for t in final["tasks"] if t["status"] == "failed")
+        self.assertEqual(len(failed["token_attempts"]), 2)
+        self.assertNotEqual(failed["token_attempts"][0]["log"], failed["token_attempts"][1]["log"])
+        loaded = service.Job.load(self.root / "jobs" / job["id"])
+        self.assertEqual(loaded.public()["tokens"]["used"], final["tokens"]["used"])
+
+    def test_legacy_job_migration_is_persisted(self):
+        job = self.create(variants="1").json()
+        self.wait_finished(job["id"])
+        folder = self.root / "jobs" / job["id"]
+        stored = json.loads((folder / "job.json").read_text())
+        for task in stored["tasks"]:
+            task.pop("token_attempts", None)
+            task.pop("token_usage", None)
+        (folder / "job.json").write_text(json.dumps(stored))
+        loaded = service.Job.load(folder)
+        saved = json.loads((folder / "job.json").read_text())
+        self.assertEqual(saved["tasks"][0]["token_usage"]["input_tokens"], 20000)
+        self.assertIsNone(saved["tasks"][0]["token_usage"]["output_tokens"])
+        self.assertEqual(service.Job.load(folder).public()["tokens"], loaded.public()["tokens"])
 
     def test_review_marks_exclusion_and_filtered_downloads(self) -> None:
         job = self.create().json()                                    # 12 outputs, 10 done

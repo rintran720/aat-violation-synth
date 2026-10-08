@@ -688,9 +688,9 @@ function planRows(frames, outputs, tokens, extra = "") {
   const rows = [];
   if (frames !== null) rows.push(["Frames used", fmt(frames)]);
   rows.push(["Outputs (Astra edits)", outputs === null ? "–" : fmt(outputs)]);
-  if (tokens) rows.push(["Estimated tokens", `~${kTok(tokens.median)} (${kTok(tokens.low)}–${kTok(tokens.high)})`]);
+  if (tokens) rows.push(["Estimated input tokens", `~${kTok(tokens.median)} (${kTok(tokens.low)}–${kTok(tokens.high)})`]);
   $("#plan").innerHTML = rows.map(([a, b]) => `<div class="plan-row"><span>${a}</span><strong>${b}</strong></div>`).join("")
-    + `<div class="hint">${perOutput ? `About ${kTok(perOutput.median)} tokens per output (${perOutput.samples} ${perOutput.basis}); the Codex count for the Astra session, imagegen's own cost not included.` : ""}${extra}</div>`;
+    + `<div class="hint">${perOutput ? `About ${kTok(perOutput.median)} input tokens per output (${perOutput.samples} ${perOutput.basis}); Codex input usage, including legacy input-only readings. Imagegen usage is not included.` : ""}${extra}</div>`;
 }
 
 function refresh() {
@@ -787,7 +787,7 @@ async function loadHistory() {
       const state = j.finished ? `${fmt(j.counts.done)}/${fmt(j.total)} done` : `${fmt(j.counts.done + j.counts.failed)}/${fmt(j.total)} made`;
       return `<a href="#job=${esc(j.id)}" data-job="${esc(j.id)}" aria-current="${job && job.id === j.id}">
         <span class="h-id">${esc(j.id)}</span><span class="h-state">${state}</span>
-        <span class="h-meta">${esc(j.engine_name)} · ${plural(j.inputs, "frame")} · ${kTok(j.tokens_used)} tokens · ${esc(when)}</span></a>`;
+        <span class="h-meta">${esc(j.engine_name)} · ${plural(j.inputs, "frame")} · ${tokenBreakdown(j.token_usage)} · ${esc(when)}</span></a>`;
     }).join("") : `<div class="help">No jobs yet.</div>`;
     document.querySelectorAll("#history a").forEach((a) => a.addEventListener("click", async (e) => {
       e.preventDefault();
@@ -900,12 +900,18 @@ function inputCount(kind, name) {
   const tasks = job.tasks.filter((t) => t.input_kind === kind && t.input === name);
   return `${tasks.filter((t) => t.status === "done").length} of ${plural(tasks.length, "output")} ready`;
 }
+function tokenBreakdown(u) {
+  if (!u) return "Usage unknown";
+  const n = (v) => typeof v === "number" ? fmt(v) : "unknown";
+  return `Input ${n(u.input_tokens)} · Cached input ${n(u.cached_input_tokens)} · Output ${n(u.output_tokens)} · ${u.complete ? "Total" : "Known total (partial)"} ${n(u.known_total_tokens)}`;
+}
 function renderTokens() {
   const t = job.tokens || {};
-  const parts = [`<span>Tokens used <b>${fmt(t.used)}</b></span>`];
-  if (t.outputs_counted) parts.push(`<span>Per output <b>${fmt(Math.round(t.used / t.outputs_counted))}</b></span>`);
-  if (!job.finished && t.estimate_left) parts.push(`<span>Still to use <b>~${kTok(t.estimate_left.median)}</b></span>`);
-  if (t.estimate_total) parts.push(`<span title="${fmt(job.total)} outputs × the median tokens per output recorded so far">Estimate for ${fmt(job.total)} outputs <b>~${kTok(t.estimate_total.median)}</b></span>`);
+  const parts = [`<span>${tokenBreakdown(t)}</span>`];
+  if (t.legacy_attempts) parts.push(`<span>${fmt(t.legacy_attempts)} legacy runs: input only; output unknown</span>`);
+  if (t.unknown_attempts) parts.push(`<span>${fmt(t.unknown_attempts)} runs with unknown usage</span>`);
+  if (!job.finished && t.estimate_left) parts.push(`<span>Estimated input remaining <b>~${kTok(t.estimate_left.median)}</b></span>`);
+  if (t.estimate_total) parts.push(`<span>Estimated input for ${fmt(job.total)} outputs <b>~${kTok(t.estimate_total.median)}</b></span>`);
   $("#tokens").innerHTML = parts.join("");
 }
 function renderSummary() {
@@ -1131,7 +1137,7 @@ function card(t) {
       ${t.status === "failed" || t.status === "interrupted" ? `<div class="card-error">${esc(t.error || "No output")}</div>` : ""}</div>
     <div class="card-foot"><span class="chip ${t.status}">${LABEL[t.status]}${t.seconds ? ` · ${t.seconds} s` : ""}</span>
       ${t.review ? `<span class="rv-chip ${t.review}">${t.review}</span>` : ""}
-      ${typeof t.tokens === "number" ? `<span class="tok">${fmt(t.tokens)} tokens</span>` : ""}
+      ${t.token_usage ? `<span class="tok">${tokenBreakdown(t.token_usage)}</span>` : ""}
       ${["done", "failed", "interrupted"].includes(t.status) ? `<button type="button" class="btn-quiet" data-rebuild>Rebuild</button>` : ""}
       ${t.status === "done" ? `<a class="btn" href="${esc(t.url)}" download="${esc(t.output_name)}">Download</a>` : ""}</div>`;
   const rb = el.querySelector("[data-rebuild]");

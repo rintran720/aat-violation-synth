@@ -14,7 +14,8 @@ the tokens Astra reported), inputs/<kind>/ (a copy of every input frame, whateve
 task: references, prompt, Astra log, raw image), outputs/<kind>/ and thumbs/. On start the service loads every
 job.json, so a job's URL keeps working; a task that was queued or running when the service stopped is marked
 interrupted and is not run again (a job only runs when someone starts it).
-Tokens: each task records the count the Codex CLI reports for its Astra session; an estimate for a new job is its
+Tokens: each attempt records structured Codex input/output/cache usage; legacy counts are input-only.
+An input-token estimate for a new job is its
 number of outputs times the median of the counts recorded so far (with the 10th-90th percentile as its range).
 """
 
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hmac
 import io
 import json
@@ -39,12 +41,14 @@ from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from starlette.background import BackgroundTask
 from starlette.datastructures import UploadFile
 
 from service.codex_status import CodexUsage
-from synth.try_astra_edit_batch import IMAGE_TYPES, ROOT, edit_frame, frames, tokens_used
+from synth.token_usage import legacy_usage, migrate_task, read_usage, summarize, update_task
+from synth.try_astra_edit_batch import IMAGE_TYPES, ROOT, edit_frame, frames
 from synth.violation_cases import ENGINES, INPUT_KINDS, catalogue
 
 JOBS_DIR = ROOT / "work/service/jobs"
@@ -81,6 +85,8 @@ class BasicAuth:
 
 
 app.add_middleware(BasicAuth)
+app.mount("/label-preview", StaticFiles(directory=ROOT / "work/label_exports", html=True, check_dir=False),
+          name="label-preview")
 executor = ThreadPoolExecutor(WORKERS, thread_name_prefix="astra")
 jobs: dict[str, "Job"] = {}
 
@@ -121,6 +127,8 @@ class Job:
         self.lock = threading.Lock()
         self.subscribers: set[WebSocket] = set()
         self.tasks = tasks if tasks is not None else self._plan()
+        for task in self.tasks:
+            migrate_task(task)
         self.excluded: set[str] = set(excluded or [])     # "<kind>/<name>" inputs the reviewer removed (X)
 
     def _plan(self) -> list[dict]:
@@ -146,9 +154,10 @@ class Job:
     # ---- views ----
     def public(self) -> dict:
         with self.lock:
-            tasks = [dict(task) for task in self.tasks]
+            tasks = copy.deepcopy(self.tasks)
         counts = {s: sum(t["status"] == s for t in tasks) for s in ("queued", "running", "done", "failed", "interrupted")}
-        used = [t["tokens"] for t in tasks if isinstance(t.get("tokens"), int)]
+        usage = summarize(a["usage"] for t in tasks for a in t["token_attempts"])
+        used = [t["tokens"] for t in tasks if t["token_attempts"]]
         pending = counts["queued"] + counts["running"]
         per_output = token_stats()
         excluded = sorted(self.excluded)
@@ -163,7 +172,7 @@ class Job:
                        for kind, images in self.inputs.items() for image in images],
             "notes": self.notes, "total": len(tasks), "counts": counts, "finished": pending == 0,
             "review": review, "excluded_inputs": excluded,
-            "tokens": {"used": sum(used), "outputs_counted": len(used),
+            "tokens": usage | {"used": sum(used), "outputs_counted": len(used),
                        "estimate_total": estimate(len(tasks)), "estimate_left": estimate(pending),
                        "per_output": per_output},
             "tasks": tasks,
@@ -173,7 +182,8 @@ class Job:
         state = self.public()
         return {key: state[key] for key in ("id", "created", "engine_name", "cases", "variants", "total", "counts",
                                             "finished")} | {"inputs": len(state["inputs"]),
-                                                            "tokens_used": state["tokens"]["used"]}
+                                                            "tokens_used": state["tokens"]["used"],
+                                                            "token_usage": state["tokens"]}
 
     # ---- disk ----
     def save(self) -> None:
@@ -183,20 +193,27 @@ class Job:
                     "variants": self.variants, "notes": self.notes,
                     "inputs": {kind: [image.name for image in images] for kind, images in self.inputs.items()},
                     "tasks": [dict(task) for task in self.tasks], "excluded_inputs": sorted(self.excluded)}
-        temporary = self.folder / f"job.json.{threading.get_ident()}.tmp"
-        temporary.write_text(json.dumps(data, indent=1))
-        os.replace(temporary, self.folder / "job.json")
+            temporary = self.folder / f"job.json.{threading.get_ident()}.tmp"
+            temporary.write_text(json.dumps(data, indent=1))
+            os.replace(temporary, self.folder / "job.json")
 
     @classmethod
     def load(cls, folder: Path) -> "Job":
         data = json.loads((folder / "job.json").read_text())
         inputs = {kind: [folder / "inputs" / kind / name for name in names] for kind, names in data["inputs"].items()}
+        needs_migration = any("token_attempts" not in t for t in data["tasks"])
         job = cls(folder, data["engine"], data["cases"], data["variants"], inputs, data.get("notes", []),
                   data.get("created"), data["tasks"], data.get("excluded_inputs"))
-        changed = False
+        changed = needs_migration
         for task in job.tasks:       # the service stopped while these were waiting or running: they are not rerun
             if task["status"] in ("queued", "running"):
                 task["status"] = "interrupted"
+                for attempt in task["token_attempts"]:
+                    if attempt.get("status") == "running":
+                        attempt["status"] = "interrupted"
+                        if attempt.get("log"):
+                            attempt["usage"] = read_usage(folder / attempt["log"])
+                update_task(task)
                 task["error"] = "The service stopped before this output was made; it was not run again."
                 changed = True
         if changed:
@@ -232,7 +249,7 @@ def load_token_history() -> None:
     """Every Astra token count recorded so far: the tasks of stored jobs and the Astra logs under work/."""
     counts = []
     for log in (ROOT / "work").rglob("astra.log"):
-        count = tokens_used(log)
+        count = read_usage(log).get("input_tokens")
         if count is not None:
             counts.append(count)
     with _token_lock:
@@ -262,7 +279,13 @@ def run_task(job: Job, task: dict) -> None:
     with job.lock:
         task["status"] = "running"
         task["started_at"] = time.time()
-        view = dict(task)
+        attempt_number = len(task["token_attempts"]) + 1
+        run = job.folder / "runs" / task["input_kind"] / task["output_name"].removesuffix(".png") / f"attempt-{attempt_number:04d}"
+        attempt = {"usage": legacy_usage(None), "status": "running", "started_at": task["started_at"],
+                   "log": str((run / "astra.log").relative_to(job.folder))}
+        task["token_attempts"].append(attempt)
+        update_task(task)
+        view = copy.deepcopy(task)
     job.save()
     job.notify({"type": "task", "task": view})
     case = ENGINES[job.engine]["cases"][task["case"]]
@@ -272,12 +295,12 @@ def run_task(job: Job, task: dict) -> None:
         change += (f" Additional request for this image, which takes priority over anything above it conflicts "
                    f"with: {task['note']}")
     try:
-        row = edit_frame(job.image(task), job.folder / "runs" / kind / task["output_name"].removesuffix(".png"),
+        row = edit_frame(job.image(task), run,
                          job.folder / "outputs" / task["path"], task["seed"], change,
                          INPUT_KINDS[kind]["scene"], refs=case["refs"])
     except Exception as error:            # edit_frame reports its own errors; this guards the pool
         row = {"error": f"{type(error).__name__}: {error}"}
-    remember_tokens(row.get("tokens"))
+    remember_tokens((row.get("token_usage") or legacy_usage(row.get("tokens"))).get("input_tokens"))
     with job.lock:
         if row.get("output"):
             task["status"] = "done"
@@ -286,9 +309,11 @@ def run_task(job: Job, task: dict) -> None:
         else:
             task["status"] = "failed"
             task["error"] = row.get("error", "no output")
-        task["tokens"] = row.get("tokens")
+        attempt.update(usage=row.get("token_usage") or legacy_usage(row.get("tokens")),
+                       status=task["status"], seconds=row.get("seconds"))
+        update_task(task)
         task["seconds"] = row.get("seconds", round(time.time() - task["started_at"]))
-        view = dict(task)
+        view = copy.deepcopy(task)
         finished = all(t["status"] not in ("queued", "running") for t in job.tasks)
     job.save()
     job.notify({"type": "task", "task": view})
@@ -530,7 +555,7 @@ async def resume(job_id: str, request: Request) -> dict:
     with job.lock:
         for task in todo:
             task["status"] = "queued"
-            for key in ("error", "seconds", "tokens", "started_at", "url", "thumb"):
+            for key in ("error", "seconds", "started_at", "url", "thumb"):
                 task.pop(key, None)
     job.loop = job.loop or asyncio.get_running_loop()
     job.save()
@@ -572,6 +597,7 @@ async def rebuild(job_id: str, task_id: str, request: Request) -> dict:
                 "seed": source["seed"] + 1000 * rounds, "status": "queued", "output_name": name,
                 "path": f"{source['input_kind']}/{name}", "rebuild_of": origin, "rebuild_round": rounds,
                 "rebuilt_from": source["id"], "note": note}
+        migrate_task(task)
         job.tasks.append(task)
     job.loop = job.loop or asyncio.get_running_loop()
     job.save()

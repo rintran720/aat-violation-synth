@@ -139,11 +139,15 @@ starts, so `#job=<id>` in the page URL and the page's list of recent jobs open a
 outputs side by side. A task that was waiting or running when the service stopped is marked interrupted and is
 never run again on its own: a job only runs when someone starts it.
 
-Tokens: each task records the `tokens used` count the Codex CLI prints for its Astra session (prompt, input images,
-replies; what the imagegen tool itself costs is not in it). Before a job starts, the page shows its number of
-outputs (for a folder or zip it asks the service with a dry run, which keeps and runs nothing) and an estimate:
-outputs x the median count of all recorded runs, with the 10th-90th percentile as the range (2026-10-06: median
-about 22k tokens per output over 83 runs). A job shows the tokens used so far, per output and on each output.
+Tokens: new runs use `codex exec --json` and read `turn.completed.usage`: input, cached input,
+output and reasoning output. Total = input + output; cached input and reasoning are subsets, not added again.
+Each task stores `token_attempts` and an aggregate `token_usage`; retries preserve earlier usage and logs in
+`runs/<kind>/<task>/attempt-NNNN/`. Failed attempts count when usage is available. Missing usage stays unknown;
+the UI labels incomplete totals. Imagegen's own usage is not collected by this counter.
+On load, legacy scalar `tokens` values migrate to input tokens, with output/cache unknown. Migration is
+idempotent and persists to job.json. The compatibility `tokens` scalar now means known input + output.
+Estimates use input tokens only (outputs × historical median, with the 10th–90th percentile range), so legacy
+input-only readings are not mixed with new total-token readings.
 
 Codex plan usage (`service/codex_status.py`, `GET /api/codex`): the service reads the signed-in plan's usage limit
 with the Codex app-server's read-only `account/rateLimits/read` (cached 60 s): the plan (2026-10-06: `prolite`), the
