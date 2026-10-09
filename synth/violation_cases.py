@@ -280,15 +280,15 @@ OPEN_HATCH = ("the floor hatch, closed in image 1, is now OPEN: its cover is lif
               "larger or smaller, and the metal frame around it stays where it was. The raised cover is as big as the "
               "hole it came from and stays attached to the frame at its hinge edge. ")
 # (lowest angle, highest angle, how the cover looks); the angle is between the cover and the floor
-LID_POSES = [      # the cover is lifted out of its frame (user, 2026-10-09: on this ship it lies beside the opening)
+LID_POSES = [      # the real hatch (user's clips, 2026-10-09): lifted on its hinge at the far edge, or lifted out
     (20, 35, "propped up only slightly: one edge still resting in the frame and the opposite edge lifted about "
              "{angle} degrees from the floor, so only a low wedge-shaped gap of the opening shows between them"),
     (40, 60, "leaning half open, tilted about {angle} degrees from the floor: one edge resting on the frame's edge and "
-             "the plate slanting over the opening, its grey underside partly visible"),
-    (75, 90, "standing on one edge beside the opening at about {angle} degrees from the floor, leaning against the "
-             "frame, its grey underside facing the camera and the whole opening uncovered"),
-    (0, 0, "laid flat on the floor right next to the opening, alongside one of its edges and not overlapping it, its "
-           "studded top face up and the whole opening uncovered"),
+             "the plate slanting over the opening, its rusty brown-yellow underside partly visible"),
+    (75, 90, "standing on one edge beside the opening at about {angle} degrees from the floor, its far edge still "
+             "on the hinge, its rusty brown-yellow underside facing the camera and the whole opening uncovered"),
+    (0, 0, "lifted right out of the frame and laid flat on the floor right next to the opening, alongside one of its "
+           "edges and not overlapping it, its studded top face up and the whole opening uncovered"),
 ]
 
 
