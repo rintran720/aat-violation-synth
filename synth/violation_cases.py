@@ -288,7 +288,7 @@ LID_POSES = [      # the real hatch (user's clips, 2026-10-09): lifted on its hi
     (75, 90, "standing on one edge beside the opening at about {angle} degrees from the floor, its far edge still "
              "on the hinge, its stained, rusty brown underside facing the camera and the whole opening uncovered"),
     (0, 0, "lifted right out of the frame and laid flat on the floor right next to the opening, alongside one of its "
-           "edges and not overlapping it, its studded top face up and the whole opening uncovered"),
+           "edges and not overlapping it, its top face up, looking exactly like the closed cover of image 1, and the whole opening uncovered"),
 ]
 
 
