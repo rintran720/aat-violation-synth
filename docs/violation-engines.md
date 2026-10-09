@@ -160,9 +160,13 @@ SKID reference). Inputs from the camera: `python -m synth.grab_rtsp_frames "<rts
 
 The page takes the input frames in one of three ways, all sorted by input kind (above): a folder path on the
 server (free text, relative to the repository or absolute), a zip of such a folder, or images uploaded into one box
-per kind. It then takes the engine, its cases and the number of variants per frame. Generate starts a job of one
-task per (frame of the engine's kinds, chosen case that takes the frame's kind, variant), each one Astra edit and
-one output; all jobs share one pool of 3 threads. Every
+per kind. It then takes the engine, its cases with a rate each, and the most outputs per frame (user, 2026-10-09).
+Generate starts a job planned per frame of the engine's kinds: each chosen case that takes the frame's kind is drawn
+with its rate (0-1, default 1: every frame), and at most "outputs per frame" of the drawn cases are kept, those the
+kind has used least so far first (ties at random), so with rate 1 everywhere and 1 output per frame each case gets
+the same share. A case comes at most once per frame, and a frame with no case drawn gets no output. The draws are
+seeded by the settings and the frame names, so the dry-run count is what the job makes; the rates are kept as
+`rates` in `job.json`. Each task is one Astra edit and one output; all jobs share one pool of 3 threads. Every
 state change of a task (running, done with its image, failed with its error) is pushed to the page over a WebSocket
 (`/ws/jobs/<job id>`) as it happens; outputs download one by one, or as one zip once the job has finished (one folder per input kind). Packages: `requirements-service.txt`.
 
@@ -205,10 +209,23 @@ with". The earlier output stays; the new one is a task of the same job, shown be
 the rounds from the first output. It takes the same Codex usage check as a job (one output; "Run anyway" passes
 `force=1`).
 
+Delete (`POST /api/jobs/<job id>/delete`, form field `task` repeated): the chosen outputs leave the page, the review
+and the downloads, and their image and thumbnail are removed; on the page, Delete on a card or "Delete N outputs" in the
+bar of chosen outputs, after a confirm. Only finished, failed or interrupted outputs (cancel waiting ones first);
+nothing is deleted when one choice is refused. The record moves to `deleted_tasks` in `job.json` and its run folder
+stays, so its tokens still count and a later rebuild never reuses its id or name.
+
+Cancel (`POST /api/jobs/<job id>/cancel`, the "Cancel N waiting" button while outputs wait): every output of the job
+still waiting for a free thread becomes interrupted ("Cancelled before it ran; Resume runs it."); the running ones
+finish. Resume runs the cancelled ones later with the same name, seed and prompt. Each queued submit carries a ticket,
+so a submit cancelled and then resumed never runs twice.
+
 Rebuild many (`POST /api/jobs/<job id>/rebuild`, form fields `task` repeated once per output, `note`, `force`): the
 same rebuild for each chosen output, all with one request, e.g. the reviewer's feedback on every bad output. On the
-page, a box on each finished, failed or interrupted card chooses it, and "Select shown" chooses every such output the
-filter shows (Bad, Unreviewed, Failed, ...); a bar at the bottom takes the request. The usage check counts all the
+page, a box on each finished, failed or interrupted card chooses it, and "Select all shown" chooses every such output
+the filters show: a status / review filter (Bad, Unreviewed, Failed, ...) combined with a case filter (the job's
+violation cases, shown when it has more than one), e.g. every bad output of one case; a bar at the bottom takes the
+request. The usage check counts all the
 outputs, and nothing is added when one of the choices is unknown or still being made. After it, the review menu
 switches to Review unreviewed, where the new outputs wait.
 

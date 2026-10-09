@@ -125,6 +125,8 @@
   .case input { margin: 3px 0 0; accent-color: var(--engine); }
   .case-title { font-weight: 600; }
   .case-meta { grid-column: 2; color: var(--ink-soft); font-size: var(--step-0); }
+  .case-rate { grid-column: 2; display: flex; align-items: center; gap: 6px; color: var(--ink-soft); font-size: var(--step-0); }
+  .case-rate input { width: 72px; padding: 3px 6px; margin: 0; }
   .tag { display: inline-block; font: 600 11px/1.6 var(--font-body); padding: 0 7px; border-radius: 99px; margin-left: 6px;
          background: var(--warn-soft); color: var(--warn); vertical-align: 1px; }
   .none { color: var(--ink-soft); font-style: italic; margin-top: 12px; }
@@ -179,6 +181,7 @@
   .meter { height: 6px; border-radius: 99px; background: var(--sunken); overflow: hidden; display: flex; margin: 12px 0 10px; }
   .meter span { height: 100%; transition: width .3s ease; }
   .meter .m-done { background: var(--ok); } .meter .m-failed { background: var(--bad); } .meter .m-running { background: var(--run); }
+  .filters { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
   .summary-row { display: flex; flex-wrap: wrap; gap: 10px 24px; justify-content: space-between; align-items: center; }
   /* review + download controls */
   .ctl { display: inline-flex; align-items: center; gap: 6px; padding: 3px; border: 1px solid var(--rule); border-radius: 8px; }
@@ -326,6 +329,7 @@
   .pick-bar .count { font-weight: 600; margin-right: auto; font-variant-numeric: tabular-nums; }
   .pick-bar textarea { width: 100%; min-height: 56px; resize: vertical; padding: 7px 9px; font: inherit; font-size: var(--step-0);
                        color: var(--ink); background: var(--ground); border: 1px solid var(--rule); border-radius: 6px; }
+  button.danger { color: var(--bad); }
   .pick-bar .err { color: var(--bad); font-size: 12px; }
   .pick-bar button.go-small { border: 0; border-radius: 6px; padding: 7px 14px; cursor: pointer;
                               background: var(--engine); color: var(--on-engine); font: 600 var(--step-0) var(--font-body); }
@@ -410,9 +414,11 @@
 
         <section class="step" id="stepGo">
           <div class="step-head"><span class="step-no">3</span><h2>Variants and generate</h2></div>
-          <label class="field" for="variants">Outputs per frame and case</label>
+          <label class="field" for="variants">Outputs per frame (at most)</label>
           <input id="variants" type="number" min="1" max="10" value="1">
-          <div class="help">Each variant is its own Astra edit with other catalogue LSP / SKID references.</div>
+          <div class="help">For each frame every chosen case is drawn with its rate (1: every frame, 0.5: about half, 0: never),
+            and at most this many of the drawn cases are made, the least used first, so each case gets about the same share.
+            One case at most once per frame; a frame with no case drawn gets no output. Each output is its own Astra edit.</div>
           <div class="plan" id="plan" aria-live="polite"></div>
           <div class="limit" id="limit" hidden></div>
           <button id="go" class="go" type="submit">Generate</button>
@@ -458,6 +464,7 @@
             <div class="sub"><span id="jobMeta"></span> · <span class="live" id="live"></span></div>
           </div>
           <div class="summary-actions">
+            <button type="button" id="cancelBtn" class="btn-quiet" hidden title="Stop the outputs still waiting for a free thread; the running ones finish, and Resume runs the cancelled ones later">Cancel waiting</button>
             <button type="button" id="resumeBtn" class="btn-quiet resume" hidden>Resume</button>
             <label class="resume-failed" id="resumeFailedWrap" hidden><input type="checkbox" id="resumeFailed"> also retry failed</label>
             <span class="ctl" title="Review the outputs one by one">
@@ -467,7 +474,6 @@
               </select>
               <button type="button" id="reviewBtn" class="btn-quiet review">Review</button>
             </span>
-            <button type="button" id="pickShown" class="btn-quiet" title="Choose every output shown by the filter below, to rebuild them with one request">Select shown</button>
             <span class="ctl" title="Download the outputs as a zip">
               <select id="dlFilter" aria-label="Which outputs to download">
                 <option value="all">All outputs</option><option value="good">Good only</option><option value="bad">Bad only</option>
@@ -481,7 +487,11 @@
         </div>
         <div class="meter" aria-hidden="true"><span class="m-done"></span><span class="m-failed"></span><span class="m-running"></span></div>
         <div class="summary-row">
-          <div class="tally" id="tally" role="group" aria-label="Show outputs"></div>
+          <div class="filters">
+            <div class="tally" id="tally" role="group" aria-label="Show outputs"></div>
+            <span class="ctl"><select id="caseFilter" aria-label="Show outputs of one violation case"></select></span>
+            <button type="button" id="pickShown" class="btn-quiet" title="Choose every output the filters show, to rebuild them with one request">Select all shown</button>
+          </div>
           <div class="tokens" id="tokens"></div>
         </div>
         <ul class="notes" id="notes" hidden></ul>
@@ -491,13 +501,14 @@
         <div class="pairs-head"><div>Input frame</div><div>Outputs made from it</div></div>
         <div id="pairRows"></div>
       </div>
-      <form class="pick-bar" id="pickBar" autocomplete="off" novalidate hidden aria-label="Rebuild the chosen outputs">
+      <form class="pick-bar" id="pickBar" autocomplete="off" novalidate hidden aria-label="Rebuild or delete the chosen outputs">
         <div class="row"><span class="count" id="pickCount"></span>
           <button type="button" class="btn-quiet" id="pickClear">Clear</button></div>
         <label class="field" for="pickNote" style="margin:0">One request for all of them: what should change?</label>
         <textarea id="pickNote" maxlength="1000" placeholder="e.g. the new LSP must touch the loaded one with no gap, same size and thickness"></textarea>
         <div class="err" id="pickErr" hidden></div>
         <div class="row" style="justify-content:flex-end">
+          <button type="button" class="btn-quiet danger" id="pickDelete" style="margin-right:auto">Delete</button>
           <button type="button" class="btn-quiet" id="pickForce" hidden>Run anyway</button>
           <button type="submit" class="go-small" id="pickGo">Rebuild</button></div>
       </form>
@@ -548,7 +559,7 @@ const fmt = (n) => (n ?? 0).toLocaleString("en-US");
 const kTok = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
 const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
 let kinds = [], engines = [], perOutput = null, mode = "folder", uploads = {}, zipFile = null;
-let job = null, socket = null, closedByUs = false, filter = "all", checkTimer = null, checkSeq = 0;
+let job = null, socket = null, closedByUs = false, filter = "all", caseFilter = "all", checkTimer = null, checkSeq = 0;
 let picked = new Set();     // ids of the outputs chosen to rebuild together
 let codex = null, fit = null, plannedOutputs = null;
 
@@ -560,6 +571,12 @@ async function loadCodex(force = false) {
   renderCodex();
   // re-judge the planned job against the new reading; no new dry run (a zip would be uploaded again)
   if (plannedOutputs) { showFit(fitFor(plannedOutputs)); refreshButton(); }
+}
+// expected outputs of one frame: each case drawn with its rate, at most `cap` kept
+function expectedPerFrame(rates, cap) {
+  let dist = [1];                           // dist[k]: chance that k cases are drawn
+  for (const p of rates) dist = [...dist, 0].map((v, k) => v * (1 - p) + (k ? dist[k - 1] * p : 0));
+  return dist.reduce((sum, v, k) => sum + v * Math.min(k, cap), 0);
 }
 function refreshButton() {
   const ready = !!engine() && chosen().length > 0 && !!plannedOutputs;
@@ -596,6 +613,10 @@ function renderCodex() {
 }
 // whether a job of n outputs fits in what the plan has left; null room = unknown, which does not block
 function fitFor(n) {
+  const f = planFit(n);
+  return f.fits || !codex || codex.enforced !== false ? f : { fits: true, reason: `${f.reason} Not enforced: it runs anyway.` };
+}
+function planFit(n) {
   if (!codex || !codex.reading) return { fits: true, reason: "The Codex usage limit could not be read." };
   if (codex.blocked) return { fits: false, reason: "Codex reports the plan's usage limit is reached; no edit can run until it resets." };
   if (codex.outputs_left === null) return { fits: true, reason: "The room left is not known yet: it is calibrated from finished outputs." };
@@ -691,8 +712,10 @@ function renderCases() {
         <input type="checkbox" id="case-${c.id}" name="case" value="${c.id}" ${i === 0 ? "checked" : ""}>
         <span><span class="case-title">${esc(c.title)}</span>${tags[c.status] ? `<span class="tag" title="${tags[c.status][1]}">${tags[c.status][0]}</span>` : ""}</span>
         <span class="case-meta">${c.catalogue !== "-" ? `${esc(c.catalogue)} · ` : ""}from ${c.input_kinds.map((k) => `<code>${esc(k)}</code>`).join(", ")}</span>
+        <span class="case-rate" title="The chance this case is drawn for a frame: 1 every frame, 0.5 about half of them, 0 never">
+          Rate <input type="number" id="rate-${c.id}" data-rate="${c.id}" min="0" max="1" step="0.1" value="1" aria-label="Rate of ${esc(c.title)}"></span>
       </label>`).join("");
-    box.querySelectorAll("input").forEach((i) => i.addEventListener("change", refresh));
+    box.querySelectorAll("input").forEach((i) => i.addEventListener(i.dataset.rate ? "input" : "change", refresh));
   }
   renderKinds();
   refresh();
@@ -700,12 +723,14 @@ function renderCases() {
 $("#engine").addEventListener("change", renderCases);
 $("#variants").addEventListener("input", refresh);
 $("#folder").addEventListener("input", refresh);
+// a case's rate: the chance it is drawn per frame, 0-1 (1 when left empty or out of range)
+function rate(id) { const v = parseFloat(($(`#rate-${id}`) || {}).value); return v >= 0 && v <= 1 ? v : 1; }
 function chosen() { return [...document.querySelectorAll("input[name=case]:checked")].map((i) => i.value); }
 
 function formData(dryRun) {
   const data = new FormData();
   data.append("engine", $("#engine").value);
-  chosen().forEach((c) => data.append("cases", c));
+  chosen().forEach((c) => { data.append("cases", c); data.append(`rate:${c}`, String(rate(c))); });
   data.append("variants", $("#variants").value);
   if (dryRun) data.append("dry_run", "1");
   if (mode === "upload") {
@@ -733,10 +758,11 @@ function refresh() {
     outputs = 0;
     for (const [kind, files] of Object.entries(uploads)) {
       if (!e || kindEngine(kind) !== e.id) continue;
-      const n = e.cases.filter((c) => cases.includes(c.id) && c.input_kinds.includes(kind)).length;
-      frames += files.length; outputs += files.length * n * variants;
+      const rates = e.cases.filter((c) => cases.includes(c.id) && c.input_kinds.includes(kind)).map((c) => rate(c.id));
+      frames += files.length; outputs += files.length * expectedPerFrame(rates, variants);
     }
     inputReady = frames > 0;
+    outputs = Math.round(outputs);          // an expected count when a rate is below 1; the job's own draw decides
     planRows(frames, outputs, outputs && perOutput ? { median: outputs * perOutput.median, low: outputs * perOutput.low, high: outputs * perOutput.high } : null,
              frames ? "" : " Add images to a kind this engine uses.");
     plannedOutputs = outputs || null;
@@ -852,7 +878,7 @@ window.addEventListener("hashchange", () => {
 // ---------- job ----------
 function openJob(state) {
   if (!job || job.id !== state.id) picked = new Set();
-  job = state; filter = "all";
+  job = state; filter = "all"; caseFilter = "all";
   try { if (location.hash !== `#job=${job.id}`) history.pushState(null, "", `#job=${job.id}`); } catch (_) {}
   const pick = $("#jobPick"); if (pick) pick.value = job.id;
   $("#start").hidden = true; $("#summary").hidden = false; $("#pairs").hidden = false;
@@ -964,11 +990,20 @@ function renderSummary() {
     .filter(([s, , n]) => s === "all" || n > 0)
     .map(([s, label, n]) => `<button type="button" class="filter" data-filter="${s}" aria-pressed="${filter === s}">${label} ${fmt(n)}</button>`).join("");
   document.querySelectorAll(".filter").forEach((b) => b.addEventListener("click", () => { filter = b.dataset.filter; renderSummary(); applyFilter(); }));
+  // case filter: the violation cases this job has outputs of, combined with the status / review filter above
+  const cases = new Map();
+  job.tasks.forEach((t) => { const c = cases.get(t.case) || { title: t.case_title, n: 0 }; c.n++; cases.set(t.case, c); });
+  if (caseFilter !== "all" && !cases.has(caseFilter)) caseFilter = "all";
+  $("#caseFilter").innerHTML = `<option value="all">All cases</option>` + [...cases].map(([id, c]) =>
+    `<option value="${esc(id)}"${id === caseFilter ? " selected" : ""}>${esc(c.title)} (${fmt(c.n)})</option>`).join("");
+  $("#caseFilter").closest(".ctl").hidden = cases.size < 2;
   renderTokens();
   // resume: outputs the service never made (it stopped) or that failed, run again on a click
   const left = (c.interrupted || 0) + (($("#resumeFailed").checked && job.finished) ? c.failed : 0);
   const canResume = job.finished && ((c.interrupted || 0) > 0 || c.failed > 0);
   $("#resumeBtn").hidden = !canResume;
+  $("#cancelBtn").hidden = !c.queued;
+  $("#cancelBtn").textContent = `Cancel ${fmt(c.queued)} waiting`;
   $("#resumeFailedWrap").hidden = !(canResume && c.failed > 0);
   $("#resumeBtn").textContent = left ? `Resume ${fmt(left)} output${left === 1 ? "" : "s"}` : "Resume";
   $("#resumeBtn").disabled = !left;
@@ -1009,6 +1044,21 @@ async function resumeJob(force) {
   } finally { if (job) renderSummary(); }
 }
 $("#resumeBtn").addEventListener("click", () => resumeJob(false));
+// cancel: every output still waiting for a thread becomes interrupted; those running finish; Resume runs them later
+$("#cancelBtn").addEventListener("click", async () => {
+  const n = job.counts.queued;
+  if (!n || !confirm(`Cancel ${plural(n, "waiting output")}? Outputs already running finish; Resume runs the cancelled ones later.`)) return;
+  const msg = $("#resumeMsg"); msg.hidden = true;
+  $("#cancelBtn").disabled = true;
+  try {
+    const res = await fetch(`/api/jobs/${job.id}/cancel`, { method: "POST" });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detail(body) || `The service answered ${res.status}.`);
+    job = body.job; renderJob(); loadCodex(); loadHistory();
+  } catch (ex) {
+    msg.textContent = String(ex.message || ex); msg.hidden = false;
+  } finally { $("#cancelBtn").disabled = false; if (job) renderSummary(); }
+});
 $("#resumeFailed").addEventListener("change", () => job && renderSummary());
 // ---------- review ----------
 function isExcluded(t) { return (job.excluded_inputs || []).includes(`${t.input_kind}/${t.input}`); }
@@ -1156,18 +1206,21 @@ document.addEventListener("keydown", (e) => {
   stage.addEventListener("pointercancel", end);
 })();
 
+function shown(t) { return (filter === "all" || cardClasses(t).includes(filter)) && (caseFilter === "all" || t.case === caseFilter); }
 function applyFilter() {
-  document.querySelectorAll(".card").forEach((el) => el.hidden = filter !== "all" && !el.classList.contains(filter));
-  document.querySelectorAll(".pair").forEach((row) => row.hidden = filter !== "all" && !row.querySelector(`.card.${filter}`));
+  const any = filter !== "all" || caseFilter !== "all";
+  document.querySelectorAll(".card").forEach((el) => { const t = taskById(el.dataset.task); el.hidden = !!t && !shown(t); });
+  document.querySelectorAll(".pair").forEach((row) => row.hidden = any && !row.querySelector(".card:not([hidden])"));
 }
+$("#caseFilter").addEventListener("change", () => { caseFilter = $("#caseFilter").value; renderPickBar(); applyFilter(); });
 function card(t) {
   const el = document.createElement("article");
   el.className = ["card", ...cardClasses(t), picked.has(t.id) ? "picked" : ""].filter(Boolean).join(" ");
-  el.id = `card-${t.id}`;
+  el.id = `card-${t.id}`; el.dataset.task = t.id;
   const shot = t.status === "done" ? `<img src="${esc(t.thumb || t.url)}" alt="${esc(t.case_title)} from ${esc(t.input)}" loading="lazy">`
     : t.status === "running" ? `<div class="spin" role="img" aria-label="Running"></div>`
     : t.status === "queued" ? "Waiting for a free thread" : "No output";
-  const pick = canRebuild(t) ? `<label class="pick" title="Choose for a rebuild with one request"><input type="checkbox" data-pick
+  const pick = canRebuild(t) ? `<label class="pick" title="Choose for a rebuild with one request, or to delete"><input type="checkbox" data-pick
     aria-label="Choose ${esc(t.case_title)} v${t.variant} from ${esc(t.input)}" ${picked.has(t.id) ? "checked" : ""}></label>` : "";
   el.innerHTML = `<div class="shot">${shot}${pick}</div>
     <div class="card-body"><div class="card-title">${esc(t.case_title)} <span class="mono">v${t.variant}${t.rebuild_round ? ` · rebuild ${t.rebuild_round}` : ""}</span></div>
@@ -1177,7 +1230,10 @@ function card(t) {
       ${t.review ? `<span class="rv-chip ${t.review}">${t.review}</span>` : ""}
       ${t.token_usage ? `<span class="tok">${tokenBreakdown(t.token_usage)}</span>` : ""}
       ${canRebuild(t) ? `<button type="button" class="btn-quiet" data-rebuild>Rebuild</button>` : ""}
+      ${canRebuild(t) ? `<button type="button" class="btn-quiet danger" data-delete title="Delete this output">Delete</button>` : ""}
       ${t.status === "done" ? `<a class="btn" href="${esc(t.url)}" download="${esc(t.output_name)}">Download</a>` : ""}</div>`;
+  const del = el.querySelector("[data-delete]");
+  if (del) del.addEventListener("click", () => deleteOutputs([t.id]));
   const rb = el.querySelector("[data-rebuild]");
   if (rb) rb.addEventListener("click", () => openRebuild(el, t));
   const box = el.querySelector("[data-pick]");
@@ -1236,19 +1292,20 @@ function setPicked(ids, on) {
   renderPickBar();
 }
 function shownRebuildable() {
-  return job.tasks.filter((t) => canRebuild(t) && (filter === "all" || cardClasses(t).includes(filter)));
+  return job.tasks.filter((t) => canRebuild(t) && shown(t));
 }
 function cardClasses(t) { return [t.status, t.status === "done" ? (t.review ? `rv-${t.review}` : "rv-none") : ""]; }
 function renderPickBar() {
   if (!job) return;
   picked = new Set([...picked].filter((id) => { const t = taskById(id); return t && canRebuild(t); }));
-  const n = picked.size, shown = shownRebuildable();
-  $("#pickShown").disabled = !shown.length || shown.every((t) => picked.has(t.id));
-  $("#pickShown").textContent = shown.length ? `Select ${fmt(shown.length)} shown` : "Select shown";
+  const n = picked.size, list = shownRebuildable();
+  $("#pickShown").disabled = !list.length || list.every((t) => picked.has(t.id));
+  $("#pickShown").textContent = list.length ? `Select all ${fmt(list.length)} shown` : "Select all shown";
   $("#pickBar").hidden = !n;
   $("#pairs").classList.toggle("picking", n > 0);
   $("#pickCount").textContent = `${plural(n, "output")} chosen`;
   $("#pickGo").textContent = n ? `Rebuild ${plural(n, "output")}` : "Rebuild";
+  $("#pickDelete").textContent = n ? `Delete ${plural(n, "output")}` : "Delete";
 }
 async function rebuildPicked(forced) {
   const note = $("#pickNote").value.trim(), err = $("#pickErr"), ids = [...picked];
@@ -1274,6 +1331,23 @@ async function rebuildPicked(forced) {
     err.textContent = String(ex.message || ex); err.hidden = false;
   } finally { $("#pickBar").querySelectorAll("button").forEach((b) => b.disabled = false); renderPickBar(); }
 }
+// delete: the outputs leave the page, the review and the downloads; their tokens still count
+async function deleteOutputs(ids) {
+  if (!ids.length || !confirm(`Delete ${plural(ids.length, "output")}? Their images are removed; this cannot be undone.`)) return;
+  const data = new FormData();
+  ids.forEach((id) => data.append("task", id));
+  const err = $("#pickErr"); err.hidden = true;
+  try {
+    const res = await fetch(`/api/jobs/${job.id}/delete`, { method: "POST", body: data });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detail(body) || `The service answered ${res.status}.`);
+    ids.forEach((id) => picked.delete(id));
+    job = body.job; renderJob(); loadHistory();
+  } catch (ex) {
+    if (picked.size) { err.textContent = String(ex.message || ex); err.hidden = false; } else alert(String(ex.message || ex));
+  }
+}
+$("#pickDelete").addEventListener("click", () => deleteOutputs([...picked]));
 $("#pickShown").addEventListener("click", () => setPicked(shownRebuildable().map((t) => t.id), true));
 $("#pickClear").addEventListener("click", () => setPicked([...picked], false));
 $("#pickBar").addEventListener("submit", (e) => { e.preventDefault(); rebuildPicked(false); });
