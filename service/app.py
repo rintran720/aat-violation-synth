@@ -743,6 +743,23 @@ async def start_job(job_folder: Path, engine: str, cases: list[str], inputs: dic
     return job
 
 
+@app.post("/api/jobs/{job_id}/move")
+async def move_job(job_id: str, request: Request) -> dict:
+    """Move a job, with all its outputs and reviews, to another project (form field project_id), one that may use
+    the job's engine. Nothing else about the job changes; a running job keeps running."""
+    job = get_job(job_id)
+    try:
+        project_id = int(str((await request.form()).get("project_id", "")))
+    except ValueError:
+        raise HTTPException(400, "choose a project")
+    if job.engine not in project_engines(project_id):
+        raise HTTPException(403, f"project {project_id} may not use engine {job.engine!r}; give it the engine first")
+    with job.lock:
+        job.project_id = project_id
+    job.save(strict=True)
+    return job.summary()
+
+
 @app.post("/api/jobs/{job_id}/regenerate")
 async def regenerate(job_id: str, request: Request) -> dict:
     """A new job from the same input frames (those not excluded) and cases as this one, made with the prompts and

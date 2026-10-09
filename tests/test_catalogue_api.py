@@ -369,6 +369,20 @@ class CatalogueApiTests(unittest.TestCase):
         self.assertEqual(into.json()["project_id"], shown["id"])
         self.wait_finished(into.json()["id"])
 
+    def test_a_job_moves_to_a_project_that_may_use_its_engine(self) -> None:
+        job = self.job(1).json()
+        self.wait_finished(job["id"])
+        floor = self.client.post("/api/projects", json={"name": "Floor only", "engines": [FLOOR]}).json()
+        self.assertEqual(self.client.post(f"/api/jobs/{job['id']}/move", data={"project_id": str(floor["id"])}).status_code, 403)
+        aat = self.client.post("/api/projects", json={"name": "AAT", "engines": [PUSH]}).json()
+        moved = self.client.post(f"/api/jobs/{job['id']}/move", data={"project_id": str(aat["id"])})
+        self.assertEqual(moved.json()["project_id"], aat["id"])
+        self.assertEqual([j["id"] for j in self.client.get(f"/api/jobs?project_id={aat['id']}").json()], [job["id"]])
+        self.assertEqual(self.client.get("/api/jobs?project_id=1").json(), [])
+        service.jobs.clear()
+        service.load_jobs(service.db.current())                      # the move is in the database
+        self.assertEqual(self.client.get(f"/api/jobs/{job['id']}").json()["project_id"], aat["id"])
+
     def test_the_pages_and_their_menu_are_served(self) -> None:
         for page in ("/", "/jobs", "/projects", "/engines", "/prompts", "/references"):
             with self.subTest(page=page):
