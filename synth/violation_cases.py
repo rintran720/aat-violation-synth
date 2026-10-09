@@ -280,33 +280,40 @@ OPEN_HATCH = ("the floor hatch, closed in image 1, is now OPEN: its cover is lif
               "larger or smaller, and the metal frame around it stays where it was. The raised cover is as big as the "
               "hole it came from and stays attached to the frame at its hinge edge. ")
 # (lowest angle, highest angle, how the cover looks); the angle is between the cover and the floor
-LID_POSES = [      # the real hatch (user's clips, 2026-10-09): lifted on its hinge at the far edge, or lifted out
-    (20, 35, "propped up only slightly: one edge still resting in the frame and the opposite edge lifted about "
-             "{angle} degrees from the floor, so only a low wedge-shaped gap of the opening shows between them"),
-    (40, 60, "leaning half open, tilted about {angle} degrees from the floor: one edge resting on the frame's edge and "
-             "the plate slanting over the opening, its stained, rusty brown underside partly visible"),
-    (75, 90, "standing on one edge beside the opening at about {angle} degrees from the floor, its far edge still "
-             "on the hinge, its stained, rusty brown underside facing the camera and the whole opening uncovered"),
-    (0, 0, "lifted right out of the frame and laid flat on the floor right next to the opening, alongside one of its "
-           "edges and not overlapping it, its top face up, looking exactly like the closed cover of image 1, and the whole opening uncovered"),
+# the cover turns on a hinge along one edge of the frame (user's clips, 2026-10-09: the far edge on both cameras;
+# user, 2026-10-09: also the left or right edge, never the edge nearest the camera, which would hide the opening)
+HINGE_EDGES = [("far", "the edge of the frame farthest from the camera", 3),
+               ("left", "the left edge of the frame as seen in the image", 1),
+               ("right", "the right edge of the frame as seen in the image", 1)]
+# (lowest angle, highest angle, how the cover looks); job 20261009-105556-53bb13: a cover barely lifted or half open
+# came out slid over the opening, and one laid beside it shrank to fit between the seats, so those poses are gone
+LID_POSES = [
+    (55, 75, "tilted open about {angle} degrees from the floor on its hinge along {edge}: that edge of the cover stays "
+             "exactly on that edge of the frame and never slides, and only the opposite, free edge is lifted, so the "
+             "opening shows under the slanted cover, widest at its free edge, with the cover's stained, rusty brown "
+             "underside partly visible"),
+    (80, 95, "standing upright on its hinge along {edge}, at about {angle} degrees from the floor: its hinge edge stays "
+             "exactly on that edge of the frame, the plate stands straight up from it with its stained, rusty brown "
+             "underside facing away from that edge, and the whole opening is uncovered"),
 ]
 
 
-def lid_pose(rng: random.Random) -> tuple[int, str]:
-    """A random cover angle (a pose band, then a multiple of 5 degrees in it) and its words for the prompt."""
+def lid_pose(rng: random.Random) -> tuple[int, str, str]:
+    """A random hinge edge (weighted), cover angle (a pose band, then a multiple of 5 degrees in it) and their words."""
+    edge, edge_words, _ = rng.choices(HINGE_EDGES, weights=[w for *_, w in HINGE_EDGES])[0]
     low, high, words = rng.choice(LID_POSES)
     angle = rng.randrange(low, high + 1, 5)
-    return angle, words.format(angle=angle)
+    return angle, edge, words.format(angle=angle, edge=edge_words)
 
 
 def fill(change: str, seed: int) -> tuple[str, dict]:
     """The change with its per-output choices made: {lid_pose} becomes a cover angle drawn from the seed and the change
-    text (so the cases of one frame differ, and the same task always gets the same angle). Returns the text and the
+    text (so the cases of one frame differ, and the same task always gets the same angle and hinge edge). Returns the text and the
     choices made ({} when the change has none)."""
     if "{lid_pose}" not in change:
         return change, {}
-    angle, words = lid_pose(random.Random(f"{seed}|{change}"))
-    return change.replace("{lid_pose}", words), {"lid_angle": angle}
+    angle, edge, words = lid_pose(random.Random(f"{seed}|{change}"))
+    return change.replace("{lid_pose}", words), {"lid_angle": angle, "hinge_edge": edge}
 NO_NEW_PEOPLE = "Nobody new is added and nobody is removed: the people stay exactly as in image 1. "
 FLOOR_LOOK = ("The open hatch must be clearly visible and unmistakable as an open floor opening, with the same lighting, "
               "blur and noise as the rest of the frame.")
