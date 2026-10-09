@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Projects · Synthetic Data Generation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/static/base.css">
+<style>
+  .engines-grant .check { padding: 8px 12px; font-size: var(--step-1); }
+  .stats { display: flex; gap: 18px; flex-wrap: wrap; color: var(--ink-soft); font-size: var(--step-0); margin: 2px 0 6px; }
+  .stats strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+  .actions .spacer { flex: 1; }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>Synthetic Data Generation</h1><span class="crumb">Projects</span>
+    <p>A project groups jobs. Each project may use only the engines given to it here; the Generate page shows a
+      project's engines and jobs.</p>
+  </header>
+
+  <div class="split">
+    <aside>
+      <div class="list" id="list" aria-label="Projects"></div>
+      <details class="add" id="newBox" open>
+        <summary>New project</summary>
+        <form id="newForm" autocomplete="off">
+          <label class="field" for="newName">Name</label>
+          <input id="newName" type="text" maxlength="120" required placeholder="e.g. AAT warehouse cam 10-16">
+          <label class="field" for="newDesc">Description</label>
+          <textarea id="newDesc" maxlength="2000" style="min-height:60px;font-family:var(--font-body)"></textarea>
+          <label class="field">Engines it may use</label>
+          <div class="checks" id="newEngines"></div>
+          <div class="actions"><button class="btn primary" type="submit">Create project</button></div>
+        </form>
+      </details>
+    </aside>
+
+    <section id="detail">
+      <div class="panel empty" id="none">Choose a project, or create one.</div>
+      <form class="panel" id="edit" hidden autocomplete="off">
+        <div class="panel-head"><h2 id="title"></h2><span class="spacer"></span>
+          <a class="btn primary" id="openGenerate" href="/">Open in Generate →</a></div>
+        <div class="stats" id="stats"></div>
+        <div class="row">
+          <div><label class="field" for="name">Name</label><input id="name" type="text" maxlength="120" required></div>
+        </div>
+        <label class="field" for="desc">Description</label>
+        <textarea id="desc" maxlength="2000" style="min-height:60px;font-family:var(--font-body)"></textarea>
+        <h3>Engines this project may use</h3>
+        <p class="help" style="margin-top:0">A job of this project can only run an engine ticked here. New engines are
+          added on the Engines page.</p>
+        <div class="checks engines-grant" id="grants"></div>
+        <div class="actions">
+          <button class="btn primary" type="submit">Save</button>
+          <span class="spacer"></span>
+          <button class="btn danger" type="button" id="delete">Delete project</button>
+        </div>
+      </form>
+    </section>
+  </div>
+</main>
+<script src="/static/ui.js"></script>
+<script src="/static/nav.js"></script>
+<script>
+let projects = [], engines = {}, current = null;
+
+function engineChecks(box, chosen, name) {
+  box.innerHTML = Object.entries(engines).map(([id, e]) => `
+    <label class="check" style="--dot:${esc(e.color)}"><input type="checkbox" name="${name}" value="${esc(id)}"
+      ${chosen.includes(id) ? "checked" : ""}><span class="dot"></span>${esc(e.name)}</label>`).join("")
+    || `<span class="help">No engines yet: add one on the Engines page.</span>`;
+}
+const ticked = (name) => $$(`input[name=${name}]:checked`).map((i) => i.value);
+
+function renderList() {
+  $("#list").innerHTML = projects.map((p) => `
+    <button type="button" data-id="${p.id}" aria-current="${current === p.id}">
+      <span class="dot" style="--dot:var(--ink-soft)"></span><span class="name">${esc(p.name)}</span>
+      <span class="count">${p.jobs} job${p.jobs === 1 ? "" : "s"}</span>
+      <span class="meta">${p.engines.length ? p.engines.map((e) => esc(engines[e]?.name || e)).join(" · ") : "no engines"}</span>
+    </button>`).join("") || `<div class="empty">No projects yet.</div>`;
+  $$("#list button").forEach((b) => b.addEventListener("click", () => select(+b.dataset.id)));
+}
+
+function select(id) {
+  current = id;
+  setParam("project", id);
+  renderList();
+  const p = projects.find((x) => x.id === id);
+  $("#none").hidden = !!p; $("#edit").hidden = !p;
+  if (!p) return;
+  $("#title").textContent = p.name;
+  $("#stats").innerHTML = `<span><strong>${p.jobs}</strong> job${p.jobs === 1 ? "" : "s"}</span>
+    <span><strong>${p.engines.length}</strong> engine${p.engines.length === 1 ? "" : "s"}</span>
+    <span>created ${esc(new Date(p.created * 1000).toLocaleDateString())}</span>`;
+  $("#name").value = p.name; $("#desc").value = p.description;
+  engineChecks($("#grants"), p.engines, "grant");
+  $("#openGenerate").href = `/?project=${p.id}`;
+  $("#delete").disabled = p.jobs > 0;
+  $("#delete").title = p.jobs ? "Only a project with no jobs can be deleted" : "";
+}
+
+async function load(selectId) {
+  const [list, catalogue] = await Promise.all([api("GET", "/api/projects"), api("GET", "/api/catalogue")]);
+  projects = list; engines = catalogue.engines;
+  engineChecks($("#newEngines"), [], "newEngine");
+  const wanted = selectId ?? (+param("project") || projects[0]?.id);
+  select(projects.some((p) => p.id === wanted) ? wanted : projects[0]?.id ?? null);
+}
+
+$("#newForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const made = await act(api("POST", "/api/projects", { name: $("#newName").value, description: $("#newDesc").value,
+                                                        engines: ticked("newEngine") }), "Project created");
+  if (made) { $("#newForm").reset(); await load(made.id); }
+});
+$("#edit").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const saved = await act(api("PATCH", `/api/projects/${current}`, { name: $("#name").value,
+    description: $("#desc").value, engines: ticked("grant") }), "Saved");
+  if (saved) await load(saved.id);
+});
+$("#delete").addEventListener("click", async () => {
+  const p = projects.find((x) => x.id === current);
+  if (!p || !confirm(`Delete project “${p.name}”?`)) return;
+  if (await act(api("DELETE", `/api/projects/${p.id}`), "Project deleted")) { setParam("project", null); await load(null); }
+});
+
+load().catch((err) => toast(err.message, true));
+</script>
+</body>
+</html>

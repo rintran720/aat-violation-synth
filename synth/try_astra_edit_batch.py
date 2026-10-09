@@ -23,6 +23,7 @@ is redone, and results.json keeps the earlier rows.
 """
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -127,6 +128,44 @@ def reference_prompt(reference_map: Path | None, change: str, scene: str = SCENE
                          **{**WAREHOUSE, **(context or {})})
 
 
+# a reference named in a prompt text: {LSP}, {SKID}, ... (upper case, so {lid_pose} and {skid} are left alone)
+REFERENCE_TOKEN = re.compile(r"\{([A-Z][A-Z0-9_]*)\}")
+
+
+def reference_labels(counts: list[tuple[str, int]]) -> dict[str, str]:
+    """What the prompt calls each reference's images, numbered on from image 2 in the order given: for LSP with two
+    images and then SKID, {"LSP": "images 2 and 3", "SKID": "image 4"}."""
+    labels, number = {}, 2
+    for ref, count in counts:
+        numbers = [str(n) for n in range(number, number + count)]
+        labels[ref] = f"image {numbers[0]}" if count == 1 else "images " + ", ".join(numbers[:-1]) + f" and {numbers[-1]}"
+        number += count
+    return labels
+
+
+def with_labels(text: str, labels: dict[str, str]) -> str:
+    """{LSP}-style names in a prompt text replaced by their image numbers; unknown names stay as written."""
+    return REFERENCE_TOKEN.sub(lambda m: labels.get(m[1], m[0]), text)
+
+
+def compose_prompt(change: str, scene: str, references: list[tuple[str, str, int]], context: dict | None = None,
+                   skid: str = KINDS["skid"]) -> str:
+    """The whole prompt: references are (id, text, image count) in order, after the frame (image 1); the change may
+    name them as {ID}. A reference's text may hold {skid}, the catalogue words for the rendered skid."""
+    labels = reference_labels([(ref, count) for ref, _, count in references])
+    lines = [f"{labels[ref].removeprefix('images ').removeprefix('image ')}. {text.replace('{skid}', skid)}"
+             for ref, text, _ in references]
+    return PROMPT.format(count=1 + sum(count for _, _, count in references), scene=scene,
+                         references="\n".join(lines), change=with_labels(change, labels),
+                         **{**WAREHOUSE, **(context or {})})
+
+
+def legacy_references(refs) -> list[dict]:
+    """The references of refs as the code holds them (the CLI): fixed sheets, or the catalogue render."""
+    return [{"id": ref, "text": REFERENCE_TEXT[ref], "render": ref in CATALOGUE_REFS,
+             "images": [FIXED_REFERENCES[ref]] if ref in FIXED_REFERENCES else []} for ref in refs]
+
+
 def reference_image(ref: str, run: Path) -> Path:
     """The image file of one reference: a fixed sheet (LSP crops, floor hatch frames), or the frame's catalogue
     render (run/refs/)."""
@@ -159,10 +198,12 @@ def tokens_used(log: Path) -> int | None:
 
 
 def edit_frame(image: Path, run: Path, output: Path, seed: int, change: str, scene: str = SCENE,
-               codex_bin: str = "codex", refs=("LSP", "SKID"), context: dict | None = None) -> dict:
-    """One Astra edit of one frame: the catalogue references in refs (seed picks the models) into run/, the edited
-    frame at its own size to output. Returns its result row (output or error, seconds, the tokens Astra reported);
-    never raises."""
+               codex_bin: str = "codex", refs=("LSP", "SKID"), context: dict | None = None,
+               references: list[dict] | None = None) -> dict:
+    """One Astra edit of one frame: the references (each {id, text, images: [paths, at most 2], render}; by default
+    the code's own for refs) after the frame, a reference with render and no image being the frame's catalogue
+    render (seed picks the models) into run/; the edited frame at its own size to output. Returns its result row
+    (output or error, seconds, the tokens Astra reported); never raises."""
     started = time.time()
     if run.exists():          # an earlier run stopped before this frame's output
         shutil.rmtree(run)
@@ -170,13 +211,27 @@ def edit_frame(image: Path, run: Path, output: Path, seed: int, change: str, sce
     row = {"input": str(image), "seed": seed}
     change, choices = fill(change, seed)       # per-output choices, e.g. the floor hatch cover's angle
     row.update(choices)
+    references = legacy_references(refs) if references is None else references
     try:
-        if CATALOGUE_REFS & set(refs):
+        rendered = [r for r in references if r["render"] and not r["images"]]
+        skid = KINDS["skid"]
+        if rendered:
             command = [sys.executable, "-m", "synth.catalogue_reference_map", "--image",
                        str(camera_sized(image, run)), "--seed", str(seed), "--out", str(run / "refs")]
             subprocess.run(command, cwd=ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        images = [image] + [reference_image(ref, run) for ref in refs]
-        prompt = reference_prompt(run / "refs" / "reference_map.json", change, scene, refs, context)
+            entries = json.loads((run / "refs" / "reference_map.json").read_text())
+            if "SKID" in entries:
+                variants = json.loads((ROOT / "work/catalogue3d/variants.json").read_text())
+                skid = KINDS[variants[entries["SKID"]["variant"]]["object"]]
+        images, listed = [image], []
+        for ref in references:
+            files = [Path(f) for f in ref["images"]] or ([run / "refs" / f"{ref['id']}.png"] if ref["render"] else [])
+            missing = [f for f in files if not f.is_file()]
+            if not files or missing:
+                raise RuntimeError(f"the {ref['id']} reference has no image" + (f": {missing[0]}" if missing else ""))
+            images += files
+            listed.append((ref["id"], ref["text"], len(files)))
+        prompt = compose_prompt(change, scene, listed, context, skid)
         (run / "prompt.txt").write_text(prompt)
         raw = run / "raw.png"
         command = [codex_bin, "exec", "--json", "--ephemeral", "-m", "gpt-6-astra", "-s", "workspace-write", "-C", str(ROOT)]

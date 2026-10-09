@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Engines · Synthetic Data Generation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/static/base.css">
+<style>
+  .flow { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: center; margin: 4px 0 2px;
+    color: var(--ink-soft); font-size: var(--step-0); }
+  .flow .box { border: 1px solid var(--rule); border-radius: 8px; padding: 8px 10px; background: var(--sunken); }
+  .flow .box strong { display: block; color: var(--ink); font-size: var(--step-1); }
+  .flow .arrow { font-size: 20px; color: var(--engine-text); }
+  .refs .check { padding: 3px 8px; }
+  .takes code { background: var(--sunken); padding: 1px 6px; border-radius: 4px; margin: 0 4px 4px 0; display: inline-block; }
+  .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  .add-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0 12px; align-items: end; }
+  .add-grid .wide { grid-column: 1 / -1; }
+  .add-grid .btn { margin-top: 12px; justify-self: start; }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>Synthetic Data Generation</h1><span class="crumb">Engines</span>
+    <p>An engine is one violation class. Its <strong>input kinds</strong> say what a valid frame shows (inputs are
+      sorted into folders named by them); its <strong>outputs</strong> (violation cases) each turn a frame of the kinds
+      they take into one violation image. Prompt texts are edited on the Prompts page.</p>
+  </header>
+
+  <div class="split">
+    <aside>
+      <div class="list" id="list" aria-label="Engines"></div>
+      <details class="add" id="newBox">
+        <summary>New engine</summary>
+        <form id="newForm" autocomplete="off">
+          <label class="field" for="newId">Id</label>
+          <input id="newId" type="text" maxlength="64" required placeholder="e.g. worker-without-helmet" pattern="[a-z0-9][a-z0-9_-]*">
+          <div class="help">a-z, 0-9, _ and -; it cannot change later.</div>
+          <div class="row">
+            <div><label class="field" for="newName">Name</label><input id="newName" type="text" maxlength="120" required></div>
+            <div class="shrink"><label class="field" for="newColor">Colour</label><input id="newColor" type="color" value="#1f62b5"></div>
+          </div>
+          <label class="field">Projects that may use it</label>
+          <div class="checks" id="newProjects"></div>
+          <div class="help">Its prompt context starts as the warehouse one; change it on the Prompts page.</div>
+          <div style="margin-top:12px"><button class="btn primary" type="submit">Create engine</button></div>
+        </form>
+      </details>
+    </aside>
+
+    <section id="detail">
+      <div class="panel empty" id="none">Choose an engine, or create one.</div>
+      <div id="engineView" hidden>
+        <form class="panel" id="engineForm" autocomplete="off">
+          <div class="panel-head"><span class="dot" id="engineDot"></span><h2 id="title"></h2><code id="engineId"></code>
+            <span class="spacer"></span><a class="btn" id="promptsLink" href="/prompts">Edit prompts →</a></div>
+          <div class="flow" aria-hidden="true">
+            <div class="box"><strong id="kindCount"></strong>input kinds</div><span class="arrow">→</span>
+            <div class="box"><strong id="caseCount"></strong>outputs (violation cases), one image each</div>
+          </div>
+          <div class="row">
+            <div><label class="field" for="name">Name</label><input id="name" type="text" maxlength="120" required></div>
+            <div class="shrink"><label class="field" for="color">Colour</label><input id="color" type="color"></div>
+          </div>
+          <label class="field">Projects that may use it</label>
+          <div class="checks" id="projects"></div>
+          <div style="display:flex;gap:8px;margin-top:14px">
+            <button class="btn primary" type="submit">Save engine</button><span style="flex:1"></span>
+            <button class="btn danger" type="button" id="deleteEngine">Delete engine</button></div>
+        </form>
+
+        <section class="panel">
+          <div class="panel-head"><h2>Input kinds</h2></div>
+          <p class="lead">What a valid frame of this engine shows. The id is the folder name inputs are sorted into.</p>
+          <div class="table-wrap"><table class="grid"><thead><tr><th>Folder (id)</th><th>Title</th><th>Taken by</th><th></th></tr></thead>
+            <tbody id="kinds"></tbody></table></div>
+          <details class="add"><summary>Add an input kind</summary>
+            <form id="kindForm" class="add-grid" autocomplete="off">
+              <div><label class="field" for="kindId">Folder (id)</label><input id="kindId" type="text" required maxlength="64"></div>
+              <div><label class="field" for="kindTitle">Title</label><input id="kindTitle" type="text" required maxlength="160"></div>
+              <div class="wide"><label class="field" for="kindScene">Scene prompt (what image 1 shows)</label>
+                <textarea id="kindScene" required placeholder="a counterbalance forklift with EMPTY forks (nothing on them)"></textarea></div>
+              <button class="btn primary" type="submit">Add input kind</button>
+            </form></details>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h2>Outputs</h2></div>
+          <p class="lead">Each output (violation case) makes ONE image from every frame of a kind it takes. It takes a
+            kind when it has a change prompt for it (Prompts page). References are the extra images given after the frame.</p>
+          <div class="table-wrap"><table class="grid"><thead><tr><th>Id</th><th>Title</th><th>Status</th>
+            <th>References</th><th>Takes</th><th></th></tr></thead><tbody id="cases"></tbody></table></div>
+          <details class="add"><summary>Add an output</summary>
+            <form id="caseForm" class="add-grid" autocomplete="off">
+              <div><label class="field" for="caseId">Id</label><input id="caseId" type="text" required maxlength="64"></div>
+              <div><label class="field" for="caseTitle">Title</label><input id="caseTitle" type="text" required maxlength="160"></div>
+              <div><label class="field" for="caseStatus">Status</label><select id="caseStatus"></select></div>
+              <div class="wide"><label class="field">References</label><div class="checks refs" id="caseRefs"></div></div>
+              <button class="btn primary" type="submit">Add output</button>
+            </form></details>
+        </section>
+      </div>
+    </section>
+  </div>
+</main>
+<script src="/static/ui.js"></script>
+<script src="/static/nav.js"></script>
+<script>
+let catalogue = null, projects = [], current = null;
+const STATUS_LABEL = { active: "Active", pending_rule: "Rule to confirm", draft: "Draft" };
+
+function statusOptions(selected) {
+  return catalogue.statuses.map((s) => `<option value="${s}" ${s === selected ? "selected" : ""}>${STATUS_LABEL[s] || s}</option>`).join("");
+}
+function refChecks(chosen, name) {
+  return catalogue.references.map((r) => `<label class="check" title="${esc(r.text)}"><input type="checkbox" name="${name}"
+    value="${r.id}" ${chosen.includes(r.id) ? "checked" : ""}>${r.id}</label>`).join("");
+}
+function projectChecks(box, engineId, name) {
+  box.innerHTML = projects.map((p) => `<label class="check"><input type="checkbox" name="${name}" value="${p.id}"
+    ${engineId && p.engines.includes(engineId) ? "checked" : ""}>${esc(p.name)}</label>`).join("") || `<span class="help">No projects yet.</span>`;
+}
+
+function renderList() {
+  $("#list").innerHTML = Object.entries(catalogue.engines).map(([id, e]) => {
+    const kinds = Object.values(catalogue.input_kinds).filter((k) => k.engine === id).length;
+    return `<button type="button" data-id="${esc(id)}" aria-current="${current === id}" style="--dot:${esc(e.color)}">
+      <span class="dot"></span><span class="name">${esc(e.name)}</span><span class="count">${Object.keys(e.cases).length}</span>
+      <span class="meta">${kinds} input kind${kinds === 1 ? "" : "s"} · ${Object.keys(e.cases).length} outputs</span></button>`;
+  }).join("") || `<div class="empty">No engines yet.</div>`;
+  $$("#list button").forEach((b) => b.addEventListener("click", () => select(b.dataset.id)));
+}
+
+function select(id) {
+  current = catalogue.engines[id] ? id : null;
+  setParam("engine", current);
+  renderList();
+  $("#none").hidden = !!current; $("#engineView").hidden = !current;
+  if (!current) return;
+  const e = catalogue.engines[current];
+  document.documentElement.style.setProperty("--engine", e.color);
+  $("#title").textContent = e.name; $("#engineId").textContent = current;
+  $("#engineDot").style.setProperty("--dot", e.color);
+  $("#name").value = e.name; $("#color").value = e.color;
+  $("#promptsLink").href = `/prompts?engine=${encodeURIComponent(current)}`;
+  projectChecks($("#projects"), current, "project");
+  const kinds = Object.entries(catalogue.input_kinds).filter(([, k]) => k.engine === current);
+  $("#kindCount").textContent = kinds.length; $("#caseCount").textContent = Object.keys(e.cases).length;
+  $("#kinds").innerHTML = kinds.map(([kid, k]) => {
+    const takers = Object.values(e.cases).filter((c) => kid in c.changes).map((c) => esc(c.title));
+    return `<tr data-kind="${esc(kid)}"><td><code>${esc(kid)}</code></td>
+      <td><input type="text" value="${esc(k.title)}" maxlength="160" aria-label="Title of ${esc(kid)}"></td>
+      <td>${takers.join(", ") || `<span class="help">no output yet</span>`}</td>
+      <td class="row-actions"><button class="btn" data-save>Save</button><button class="btn danger" data-del>Delete</button></td></tr>`;
+  }).join("") || `<tr><td colspan="4" class="empty">No input kinds yet.</td></tr>`;
+  $("#cases").innerHTML = Object.entries(e.cases).map(([cid, c]) => `<tr data-case="${esc(cid)}">
+      <td><code>${esc(cid)}</code></td>
+      <td><input type="text" name="title" value="${esc(c.title)}" maxlength="160" aria-label="Title of ${esc(cid)}"></td>
+      <td><select name="status" aria-label="Status">${statusOptions(c.status)}</select></td>
+      <td><div class="checks refs">${refChecks(c.refs, `ref-${cid}`)}</div></td>
+      <td class="takes">${Object.keys(c.changes).map((k) => `<code>${esc(k)}</code>`).join("") || `<span class="help">none: add a prompt</span>`}</td>
+      <td class="row-actions"><button class="btn" data-save>Save</button><button class="btn danger" data-del>Delete</button></td></tr>`).join("")
+    || `<tr><td colspan="6" class="empty">No outputs yet.</td></tr>`;
+  $("#caseStatus").innerHTML = statusOptions("draft");
+  $("#caseRefs").innerHTML = refChecks([], "newRef");
+  bindRows();
+}
+
+function bindRows() {
+  $$("#kinds tr[data-kind]").forEach((tr) => {
+    const kid = tr.dataset.kind;
+    $("[data-save]", tr).addEventListener("click", () => change(api("PATCH", `/api/input-kinds/${kid}`, { title: $("input", tr).value }), "Input kind saved"));
+    $("[data-del]", tr).addEventListener("click", () => confirm(`Delete input kind ${kid}? Its prompts in every output go too.`)
+      && change(api("DELETE", `/api/input-kinds/${kid}`), "Input kind deleted"));
+  });
+  $$("#cases tr[data-case]").forEach((tr) => {
+    const cid = tr.dataset.case, url = `/api/engines/${current}/cases/${cid}`;
+    $("[data-save]", tr).addEventListener("click", () => change(api("PATCH", url, {
+      title: $("[name=title]", tr).value, status: $("[name=status]", tr).value,
+      refs: $$(`input[name="ref-${cid}"]:checked`, tr).map((i) => i.value) }), "Output saved"));
+    $("[data-del]", tr).addEventListener("click", () => confirm(`Delete output ${cid} and its prompts?`) && change(api("DELETE", url), "Output deleted"));
+  });
+}
+
+async function change(promise, done) {
+  const data = await act(promise, done);
+  if (data && data.engines) { catalogue = data; select(current); }
+  return data;
+}
+
+async function load(selectId) {
+  [catalogue, projects] = await Promise.all([api("GET", "/api/catalogue"), api("GET", "/api/projects")]);
+  projectChecks($("#newProjects"), null, "newProject");
+  const ids = Object.keys(catalogue.engines);
+  select(selectId && catalogue.engines[selectId] ? selectId : param("engine") && catalogue.engines[param("engine")] ? param("engine") : ids[0]);
+}
+
+$("#engineForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const want = new Set($$("input[name=project]:checked").map((i) => +i.value));    // read before the re-render
+  if (!await change(api("PATCH", `/api/engines/${current}`, { name: $("#name").value, color: $("#color").value }))) return;
+  const updates = projects.filter((p) => want.has(p.id) !== p.engines.includes(current)).map((p) => api("PATCH", `/api/projects/${p.id}`, {
+    engines: want.has(p.id) ? [...p.engines, current] : p.engines.filter((e) => e !== current) }));
+  if (await act(Promise.all(updates), "Engine saved")) await load(current);
+});
+$("#deleteEngine").addEventListener("click", async () => {
+  if (!confirm(`Delete engine ${current} with its input kinds, outputs and prompts?`)) return;
+  if (await act(api("DELETE", `/api/engines/${current}`), "Engine deleted")) await load(null);
+});
+$("#newForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const id = $("#newId").value.trim();
+  const made = await act(api("POST", "/api/engines", { id, name: $("#newName").value, color: $("#newColor").value,
+    projects: $$("input[name=newProject]:checked").map((i) => +i.value) }), "Engine created");
+  if (made) { $("#newForm").reset(); $("#newBox").open = false; await load(id); }
+});
+$("#kindForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  if (await change(api("POST", `/api/engines/${current}/input-kinds`, { id: $("#kindId").value.trim(),
+    title: $("#kindTitle").value, scene: $("#kindScene").value }), "Input kind added")) $("#kindForm").reset();
+});
+$("#caseForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  if (await change(api("POST", `/api/engines/${current}/cases`, { id: $("#caseId").value.trim(), title: $("#caseTitle").value,
+    status: $("#caseStatus").value,
+    refs: $$("input[name=newRef]:checked").map((i) => i.value) }), "Output added — now write its prompts")) $("#caseForm").reset();
+});
+
+load().catch((err) => toast(err.message, true));
+</script>
+</body>
+</html>

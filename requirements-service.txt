@@ -2,4 +2,6 @@ fastapi
 uvicorn
 python-multipart
 websockets
+sqlalchemy>=2.0
+pymysql
 httpx  # FastAPI TestClient, for tests/test_service.py

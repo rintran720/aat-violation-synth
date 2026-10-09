@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Prompts · Synthetic Data Generation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/static/base.css">
+<style>
+  .anatomy { margin: 0; padding: 12px 14px; border-radius: 8px; background: var(--sunken); white-space: pre-wrap;
+    font: 400 var(--step-0)/1.6 var(--font-mono); color: var(--ink-soft); }
+  .anatomy b { color: var(--engine-text); font-weight: 500; }
+  .prompt { border-top: 1px solid var(--rule); padding: 12px 0 4px; }
+  .prompt:first-of-type { border-top: 0; }
+  .prompt-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+  .prompt-head .what { font-weight: 600; }
+  .prompt-head .spacer { flex: 1; }
+  .prompt-head .state { font-size: var(--step-0); color: var(--ink-soft); }
+  .prompt-head .state.dirty { color: var(--warn); font-weight: 600; }
+  .case-block { border: 1px solid var(--rule); border-radius: 8px; padding: 4px 14px 10px; margin-top: 12px; }
+  .case-block > h3 { display: flex; gap: 8px; align-items: baseline; margin: 10px 0 2px; }
+  .ref { border-top: 1px solid var(--rule); padding: 10px 0; font-size: var(--step-0); }
+  .ref strong { font-family: var(--font-mono); }
+  .ref p { margin: 4px 0 0; color: var(--ink-soft); }
+  textarea.tall { min-height: 150px; }
+  .off { opacity: .65; }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>Synthetic Data Generation</h1><span class="crumb">Prompts</span>
+    <p>Every text the Astra edit prompt is built from. A change applies to the next output made, in every project;
+      each output's run folder keeps the exact prompt it got.</p>
+  </header>
+
+  <div class="split">
+    <aside>
+      <div class="list" id="list" aria-label="Engines"></div>
+      <div class="panel" style="margin-top:16px">
+        <h2 style="font-size:var(--step-2)">How a prompt is built</h2>
+        <pre class="anatomy">You are given N reference images from <b>{setting}</b>:
+1. Full scene: <b>{scene prefix}</b><b>{input kind scene}</b>.
+2.. the output's references
+
+<b>{objects}</b>
+
+Edit image 1 only. Keep the SAME … viewpoint. <b>{keep}</b> …
+
+Make this ONE change: <b>{output change for the kind}</b></pre>
+      </div>
+    </aside>
+
+    <section id="detail">
+      <div class="panel empty" id="none">Choose an engine.</div>
+      <div id="view" hidden>
+        <section class="panel">
+          <div class="panel-head"><span class="dot" id="dot"></span><h2 id="title"></h2></div>
+          <p class="lead">The engine's context: where the camera is and what its objects are. Every output of the engine gets it.</p>
+          <div id="context"></div>
+        </section>
+        <section class="panel">
+          <h2>Input kind scenes</h2>
+          <p class="lead">What image 1 shows, for each kind of input frame.</p>
+          <div id="scenes"></div>
+        </section>
+        <section class="panel">
+          <h2>Output prompts</h2>
+          <p class="lead">The ONE change each output makes, per input kind. Leave a kind empty and the output does not
+            take frames of it. Name an object reference as <code>{LSP}</code>, <code>{SKID}</code>, …: each output numbers it
+            (“image 2”, “image 3”, … in the order of the output's references). <code>{lid_pose}</code> is filled with a
+            random floor-hatch cover angle per output.</p>
+          <div id="cases"></div>
+        </section>
+        <section class="panel">
+          <h2>References</h2>
+          <p class="lead">What the prompt says each object reference shows; edit them and their images on the
+            <a href="/references">Object references</a> page.</p>
+          <div id="refs"></div>
+        </section>
+      </div>
+    </section>
+  </div>
+</main>
+<dialog class="sheet" id="preview" aria-label="Prompt preview">
+  <header><strong id="previewTitle">Prompt preview</strong><button class="btn" type="button" id="previewClose">Close</button></header>
+  <pre id="previewText"></pre>
+</dialog>
+<script src="/static/ui.js"></script>
+<script src="/static/nav.js"></script>
+<script>
+let catalogue = null, current = null;
+const FIELD = {
+  setting: ["Setting", "Where the camera is: “You are given N reference images from …”"],
+  scene_prefix: ["Scene prefix", "Put before the input kind's scene, e.g. “the warehouse floor with ”"],
+  objects: ["Objects", "What the objects of this engine are, with sizes"],
+  keep: ["Keep rules", "What must not change"],
+};
+
+// one editable prompt: a textarea, its state, a Save button and an optional Preview
+function block(key, label, sub, value, { tall = false, preview = null } = {}) {
+  return `<div class="prompt" data-key="${esc(key)}">
+    <div class="prompt-head"><span class="what">${label}</span>${sub ? `<span class="help" style="margin:0">${sub}</span>` : ""}
+      <span class="spacer"></span><span class="state" aria-live="polite"></span>
+      ${preview ? `<button class="btn" type="button" data-preview="${esc(preview)}" ${value ? "" : "disabled"}>Preview</button>` : ""}
+      <button class="btn primary" type="button" data-save disabled>Save</button></div>
+    <textarea class="${tall ? "tall" : ""}" aria-label="${esc(label)}" spellcheck="false">${esc(value)}</textarea></div>`;
+}
+
+function refTitle(id) { return (catalogue.references.find((r) => r.id === id) || {}).title || ""; }
+
+function renderList() {
+  $("#list").innerHTML = Object.entries(catalogue.engines).map(([id, e]) => `
+    <button type="button" data-id="${esc(id)}" aria-current="${current === id}" style="--dot:${esc(e.color)}">
+      <span class="dot"></span><span class="name">${esc(e.name)}</span><span class="count">${Object.keys(e.cases).length}</span></button>`).join("");
+  $$("#list button").forEach((b) => b.addEventListener("click", () => {
+    if (!$$(".state.dirty").length || confirm("Leave without saving the changed prompts?")) select(b.dataset.id);
+  }));
+}
+
+function select(id) {
+  current = catalogue.engines[id] ? id : null;
+  setParam("engine", current);
+  renderList();
+  $("#none").hidden = !!current; $("#view").hidden = !current;
+  if (!current) return;
+  const e = catalogue.engines[current];
+  document.documentElement.style.setProperty("--engine", e.color);
+  $("#dot").style.setProperty("--dot", e.color); $("#title").textContent = e.name;
+  $("#context").innerHTML = catalogue.prompt_fields.map((f) =>
+    block(`engine:${f}`, FIELD[f][0], FIELD[f][1], e.prompt[f], { tall: f === "objects" })).join("");
+  const kinds = Object.entries(catalogue.input_kinds).filter(([, k]) => k.engine === current);
+  $("#scenes").innerHTML = kinds.map(([kid, k]) => block(`kind:${kid}`, esc(k.title), `<code>${esc(kid)}</code>`, k.scene)).join("")
+    || `<div class="empty">No input kinds: add them on the Engines page.</div>`;
+  $("#cases").innerHTML = Object.entries(e.cases).map(([cid, c]) => `<div class="case-block">
+      <h3>${esc(c.title)} <code class="help">${esc(cid)}</code></h3>
+      <div class="help" style="margin:0 0 4px">Images: 1 = the input frame${c.refs.map((r, i) =>
+        ` · ${i + 2} = <code>{${esc(r)}}</code> ${esc(refTitle(r))}`).join("")}${c.refs.length ? "" : " (no object reference)"}
+        — <a href="/engines?engine=${encodeURIComponent(current)}">change on Engines</a></div>
+      ${kinds.map(([kid, k]) => `<div class="${c.changes[kid] ? "" : "off"}">${block(`case:${cid}:${kid}`, `from ${esc(k.title)}`,
+        c.changes[kid] ? "" : "not taken", c.changes[kid] || "", { tall: true, preview: `${cid}|${kid}` })}</div>`).join("")}
+    </div>`).join("") || `<div class="empty">No outputs: add them on the Engines page.</div>`;
+  $("#refs").innerHTML = catalogue.references.map((r) => `<div class="ref"><strong>{${esc(r.id)}}</strong>
+    <span class="help">${esc(r.source)}</span><p>${esc(r.text)}</p></div>`).join("");
+  bind();
+}
+
+function bind() {
+  $$(".prompt").forEach((box) => {
+    const area = $("textarea", box), save = $("[data-save]", box), state = $(".state", box), original = area.value;
+    area.addEventListener("input", () => {
+      const dirty = area.value !== original;
+      save.disabled = !dirty; state.textContent = dirty ? "changed" : ""; state.classList.toggle("dirty", dirty);
+    });
+    save.addEventListener("click", () => persist(box.dataset.key, area.value));
+    const pv = $("[data-preview]", box);
+    if (pv) pv.addEventListener("click", () => preview(...pv.dataset.preview.split("|")));
+  });
+}
+
+async function persist(key, value) {
+  const [what, a, b] = key.split(":");
+  const call = what === "engine" ? api("PATCH", `/api/engines/${current}`, { [a]: value })
+    : what === "kind" ? api("PATCH", `/api/input-kinds/${a}`, { scene: value })
+    : api("PUT", `/api/engines/${current}/cases/${a}/prompts/${b}`, { change: value });
+  const data = await act(call, value.trim() || what !== "case" ? "Prompt saved" : "Removed: the output no longer takes that kind");
+  if (!data) return;
+  const dirty = $$(".prompt").filter((box) => $(".state", box).classList.contains("dirty") && box.dataset.key !== key)
+    .map((box) => [box.dataset.key, $("textarea", box).value]);
+  catalogue = data.engines ? data : await api("GET", "/api/catalogue");
+  select(current);
+  for (const [k, v] of dirty) {          // keep the other unsaved edits on the page
+    const area = $(`.prompt[data-key="${CSS.escape(k)}"] textarea`);
+    if (area) { area.value = v; area.dispatchEvent(new Event("input")); }
+  }
+}
+
+async function preview(caseId, kind) {
+  const data = await act(api("GET", `/api/prompt-preview?engine=${encodeURIComponent(current)}&case=${encodeURIComponent(caseId)}&kind=${encodeURIComponent(kind)}`));
+  if (!data) return;
+  $("#previewTitle").textContent = `${catalogue.engines[current].cases[caseId].title} · from ${catalogue.input_kinds[kind].title}`;
+  $("#previewText").textContent = data.prompt;
+  $("#preview").showModal();
+}
+$("#previewClose").addEventListener("click", () => $("#preview").close());
+window.addEventListener("beforeunload", (e) => { if ($$(".state.dirty").length) e.preventDefault(); });
+
+api("GET", "/api/catalogue").then((data) => {
+  catalogue = data;
+  select(param("engine") && data.engines[param("engine")] ? param("engine") : Object.keys(data.engines)[0]);
+}).catch((err) => toast(err.message, true));
+</script>
+</body>
+</html>

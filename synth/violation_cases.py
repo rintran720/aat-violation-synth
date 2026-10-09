@@ -200,7 +200,7 @@ ENGINES = {
         },
     },
     "forklift-charging-multiple-skids-horizontally": {
-        "name": "Forklift Charging Multiple Skids Horizontally",
+        "name": "Charging Multiple Skids",
         "color": "#974935",
         "cases": {
             "carry_2_skids_side_by_side": {      # the id stays as stored jobs name it

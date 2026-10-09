@@ -1,12 +1,15 @@
-"""Violation image generation service: a web UI over synth.try_astra_edit_batch.edit_frame.
+"""Synthetic Data Generation service: a web UI over synth.try_astra_edit_batch.edit_frame.
 
 Run: .venv/bin/python -m uvicorn service.app:app --host 127.0.0.1 --port 8000   (then open http://127.0.0.1:8000)
-Inputs are sorted by input kind (synth.violation_cases.INPUT_KINDS: what the frame shows, e.g. a forklift with an
-LSP and cargo), given in one of three ways: a folder path on this machine (free text) whose sub-folders are named by
-kind, a zip of such a folder, or images uploaded per kind. A job takes one engine, some of its cases and a number of
-outputs per frame (`variants`): each input kind feeds one engine, so only frames of that engine's kinds are used, and
-each frame gets `variants` tasks, each of one chosen case that takes the frame's kind (the cases take turns across
-frames), each task making exactly one output with one Astra edit. Tasks of all
+The database (MySQL, configured in .env; service.store) holds the projects, the engines each project may use, the
+engine catalogue (input kinds, cases and every prompt text, edited on the Engines and Prompts pages) and which
+project each job belongs to.
+Inputs are sorted by input kind (what the frame shows, e.g. a forklift with an LSP and cargo), given in one of three
+ways: a folder path on this machine (free text) whose sub-folders are named by kind, a zip of such a folder, or images
+uploaded per kind. A job belongs to one project and takes one engine the project may use and some of its cases: each
+input kind feeds one engine, so only frames of that engine's kinds are used, and every chosen case that takes a
+frame's kind makes exactly ONE output of that frame (user, 2026-10-09: no outputs-per-frame setting, no case rates),
+each with one Astra edit. Tasks of all
 jobs share one pool of WORKERS threads (3 at a time); each task's state goes to the job's WebSocket subscribers as
 soon as it changes, its output included, and a job's outputs download one by one or as one zip (one folder per
 input kind).
@@ -30,7 +33,6 @@ import hmac
 import io
 import json
 import os
-import random
 import re
 import shutil
 import statistics
@@ -43,28 +45,34 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from starlette.background import BackgroundTask
 from starlette.datastructures import UploadFile
 
+from service import job_records
+from service import reference_store
+from service import store as db
+from service.catalogue_api import router as catalogue_router
 from service.codex_status import CodexUsage
+from service.settings import database_url
 from synth.token_usage import legacy_usage, migrate_task, read_usage, summarize, update_task
-from synth.try_astra_edit_batch import IMAGE_TYPES, ROOT, edit_frame, frames
-from synth.violation_cases import ENGINES, INPUT_KINDS, catalogue, prompt_context
+from synth.try_astra_edit_batch import IMAGE_TYPES, ROOT, edit_frame, frames, reference_labels, with_labels
 
 JOBS_DIR = ROOT / "work/service/jobs"
 STATIC = Path(__file__).resolve().parent / "static"
 WORKERS = 3
-MAX_VARIANTS = 10
+PAGES = {"": "index.html", "projects": "projects.html", "engines": "engines.html", "prompts": "prompts.html",
+         "references": "references.html"}
 MAX_TASKS = 500
 # the Codex usage limit only warns (user, 2026-10-09: do not block generating when the quota is used up); with
 # ENFORCE_CODEX_LIMIT=1 in the environment a job, resume or rebuild over it is refused (409) unless forced
 ENFORCE_CODEX_LIMIT = os.environ.get("ENFORCE_CODEX_LIMIT") == "1"
-FALLBACK_TOKENS = 22_000          # median Astra tokens per output over the first 83 runs (2026-10-06)
+# median input tokens of one output (cached ones included) over the 152 fully counted runs of 2026-10-08/09
+FALLBACK_TOKENS = 124_000
 
-app = FastAPI(title="Violation generator")
+app = FastAPI(title="Synthetic Data Generation")
 
 
 class BasicAuth:
@@ -85,12 +93,33 @@ class BasicAuth:
         if scope["type"] == "websocket":
             return await send({"type": "websocket.close", "code": 1008})
         await send({"type": "http.response.start", "status": 401,
-                    "headers": [(b"www-authenticate", b'Basic realm="Violation Generator"'),
+                    "headers": [(b"www-authenticate", b'Basic realm="Synthetic Data Generation"'),
                                 (b"content-type", b"text/plain")]})
-        await send({"type": "http.response.body", "body": b"Sign in to use the Violation Generator."})
+        await send({"type": "http.response.body", "body": b"Sign in to use Synthetic Data Generation."})
 
 
 app.add_middleware(BasicAuth)
+app.include_router(catalogue_router)
+app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+@app.exception_handler(db.StoreError)
+async def store_error(_: Request, error: db.StoreError) -> JSONResponse:
+    return JSONResponse({"detail": str(error)}, status_code=error.status)
+
+
+def catalog() -> dict:
+    """The engines, input kinds, cases and prompts as the database holds them now (service.store.Store.catalogue)."""
+    return db.current().catalogue()
+
+
+def engine_name(engine_id: str) -> str:
+    """The engine's display name; its id when the database cannot be read (a job view must not fail on it)."""
+    try:
+        return db.current().engine_name(engine_id)
+    except Exception:
+        return engine_id
+
 app.mount("/label-preview", StaticFiles(directory=ROOT / "work/label_exports", html=True, check_dir=False),
           name="label-preview")
 executor = ThreadPoolExecutor(WORKERS, thread_name_prefix="astra")
@@ -129,18 +158,19 @@ async def codex_fit(outputs: int) -> dict:
 
 
 class Job:
-    def __init__(self, folder: Path, engine: str, cases: list[str], variants: int, inputs: dict[str, list[Path]],
-                 notes: list[str], created: float | None = None, tasks: list[dict] | None = None,
-                 excluded: list[str] | None = None, deleted: list[dict] | None = None,
-                 rates: dict[str, float] | None = None):
+    def __init__(self, folder: Path, engine: str, cases: list[str], inputs: dict[str, list[Path]],
+                 notes: list[str], project_id: int | None = None, created: float | None = None,
+                 tasks: list[dict] | None = None, excluded: list[str] | None = None,
+                 deleted: list[dict] | None = None):
         self.id = folder.name
         self.folder = folder
-        self.engine, self.cases, self.variants = engine, cases, variants
-        self.rates = {case_id: (rates or {}).get(case_id, 1.0) for case_id in cases}   # chance a case is drawn
+        self.engine, self.cases, self.project_id = engine, cases, project_id
         self.inputs, self.notes = inputs, notes
         self.created = created or time.time()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.lock = threading.Lock()
+        self.save_lock = threading.Lock()       # one save at a time, so an older state never lands last
+        self.db_sent: dict[str, str] = {}       # task id -> what the database holds of it (job_records)
         self.subscribers: set[WebSocket] = set()
         self.tasks = tasks if tasks is not None else self._plan()
         for task in self.tasks:
@@ -151,29 +181,19 @@ class Job:
         self.tickets: dict[str, int] = {}       # task id -> its latest submit; an older (cancelled) submit does nothing
 
     def _plan(self) -> list[dict]:
-        """At most `variants` outputs per frame (user, 2026-10-09), each of a different chosen case that takes the
-        frame's kind. Per frame every such case is drawn with its rate (0-1, default 1); when more are drawn than
-        `variants`, the ones the kind has used least so far are kept (ties at random), so with rate 1 everywhere
-        and 1 output per frame each case comes once every 4 frames (in a random order). A frame where no case is drawn gets no output.
-        The draws are seeded by the settings and the frame names, so a dry run counts exactly what the job makes."""
-        rng = random.Random(json.dumps([self.engine, self.cases, self.variants, self.rates,
-                                        {kind: [image.name for image in images] for kind, images in self.inputs.items()}]))
-        tasks, frame_index = [], 0
+        """ONE output per frame and chosen case that takes the frame's kind (user, 2026-10-09), in the order the
+        cases are listed; each gets its own seed."""
+        cases = catalog()["engines"][self.engine]["cases"]
+        tasks = []
         for kind, images in self.inputs.items():
-            takes = [c for c in self.cases if kind in ENGINES[self.engine]["cases"][c]["changes"]]
-            used = dict.fromkeys(takes, 0)
+            takes = [c for c in self.cases if kind in cases[c]["changes"]]
             for image in images:
-                drawn = [c for c in takes if rng.random() < self.rates[c]]
-                rng.shuffle(drawn)
-                drawn = sorted(drawn, key=lambda c: used[c])[:self.variants]     # stable: ties stay shuffled
-                for k, case_id in enumerate(sorted(drawn, key=takes.index)):
-                    used[case_id] += 1
+                for case_id in takes:
                     name = f"{image.stem}__{case_id}__v1.png"
                     tasks.append({"id": f"t{len(tasks) + 1:04d}", "input": image.name, "input_kind": kind,
-                                  "case": case_id, "case_title": ENGINES[self.engine]["cases"][case_id]["title"],
-                                  "variant": 1, "seed": frame_index * self.variants + k, "status": "queued",
+                                  "case": case_id, "case_title": cases[case_id]["title"],
+                                  "variant": 1, "seed": len(tasks), "status": "queued",
                                   "output_name": name, "path": f"{kind}/{name}"})
-                frame_index += 1
         return tasks
 
     def image(self, task: dict) -> Path:
@@ -195,9 +215,8 @@ class Job:
                   "unreviewed": sum(not t.get("review") for t in kept), "outputs": len(kept)}
         return {
             "id": self.id, "created": self.created, "engine": self.engine,
-            "engine_name": ENGINES[self.engine]["name"], "cases": self.cases, "variants": self.variants,
-            "rates": self.rates,
-            "rates": self.rates, "inputs": [{"kind": kind, "name": image.name, "url": f"/api/jobs/{self.id}/inputs/{kind}/{image.name}",
+            "engine_name": engine_name(self.engine), "cases": self.cases, "project_id": self.project_id,
+            "inputs": [{"kind": kind, "name": image.name, "url": f"/api/jobs/{self.id}/inputs/{kind}/{image.name}",
                         "thumb": f"/api/jobs/{self.id}/input-thumbs/{kind}/{image.name}"}
                        for kind, images in self.inputs.items() for image in images],
             "notes": self.notes, "total": len(tasks), "counts": counts, "finished": pending == 0,
@@ -210,32 +229,60 @@ class Job:
 
     def summary(self) -> dict:
         state = self.public()
-        return {key: state[key] for key in ("id", "created", "engine_name", "cases", "variants", "total", "counts",
-                                            "finished")} | {"inputs": len(state["inputs"]),
+        return {key: state[key] for key in ("id", "created", "engine", "engine_name", "cases", "project_id",
+                                            "total", "counts", "finished")} | {"inputs": len(state["inputs"]),
                                                             "tokens_used": state["tokens"]["used"],
                                                             "token_usage": state["tokens"]}
 
-    # ---- disk ----
-    def save(self) -> None:
-        """job.json, written whole and then renamed into place, so a reader never sees half of it."""
-        with self.lock:
-            data = {"id": self.id, "created": self.created, "engine": self.engine, "cases": self.cases,
-                    "variants": self.variants, "rates": self.rates, "notes": self.notes,
-                    "inputs": {kind: [image.name for image in images] for kind, images in self.inputs.items()},
-                    "tasks": [dict(task) for task in self.tasks], "excluded_inputs": sorted(self.excluded),
-                    "deleted_tasks": [dict(task) for task in self.deleted]}
+    # ---- disk and database ----
+    def state(self) -> dict:
+        """Everything about the job but its files: the job.json dict (the caller holds self.lock)."""
+        return {"id": self.id, "created": self.created, "engine": self.engine, "cases": self.cases,
+                "project_id": self.project_id, "notes": self.notes,
+                "inputs": {kind: [image.name for image in images] for kind, images in self.inputs.items()},
+                "tasks": [copy.deepcopy(task) for task in self.tasks], "excluded_inputs": sorted(self.excluded),
+                "deleted_tasks": [copy.deepcopy(task) for task in self.deleted]}
+
+    def save(self, strict: bool = False) -> None:
+        """The job's full state into the database (its row and the tasks changed since the last save) and into
+        job.json, written whole and then renamed into place. A database error is logged and the tasks it missed are
+        sent with the next save; with strict it is raised (a new job that cannot be recorded is not run)."""
+        with self.save_lock:
+            with self.lock:
+                data = self.state()
+            self.folder.mkdir(parents=True, exist_ok=True)
             temporary = self.folder / f"job.json.{threading.get_ident()}.tmp"
             temporary.write_text(json.dumps(data, indent=1))
             os.replace(temporary, self.folder / "job.json")
+            sent = {task["id"]: json.dumps([deleted, task], sort_keys=True)
+                    for deleted, tasks in ((False, data["tasks"]), (True, data["deleted_tasks"])) for task in tasks}
+            changed = [(deleted, task) for deleted, tasks in ((False, data["tasks"]), (True, data["deleted_tasks"]))
+                       for task in tasks if self.db_sent.get(task["id"]) != sent[task["id"]]]
+            try:
+                job_records.save_job(db.current().db, data, changed)
+            except Exception as error:
+                if strict:
+                    raise
+                print(f"job {self.id} not saved to the database: {type(error).__name__}: {error}", flush=True)
+                return
+            self.db_sent = sent
 
     @classmethod
     def load(cls, folder: Path) -> "Job":
-        data = json.loads((folder / "job.json").read_text())
+        """A job from its job.json (one the database does not hold yet)."""
+        return cls.from_state(folder, json.loads((folder / "job.json").read_text()), in_db=False)
+
+    @classmethod
+    def from_state(cls, folder: Path, data: dict, in_db: bool) -> "Job":
+        """A job from its state (the job.json dict, from the database or the file); saved again when it changed."""
         inputs = {kind: [folder / "inputs" / kind / name for name in names] for kind, names in data["inputs"].items()}
         needs_migration = any("token_attempts" not in t for t in data["tasks"])
-        job = cls(folder, data["engine"], data["cases"], data["variants"], inputs, data.get("notes", []),
-                  data.get("created"), data["tasks"], data.get("excluded_inputs"), data.get("deleted_tasks"),
-                  data.get("rates"))
+        # jobs made before projects also hold variants and rates: they only shaped the plan, now in data["tasks"]
+        job = cls(folder, data["engine"], data["cases"], inputs, data.get("notes", []), data.get("project_id"),
+                  data.get("created"), data["tasks"], data.get("excluded_inputs"), data.get("deleted_tasks"))
+        if in_db:
+            job.db_sent = {task["id"]: json.dumps([deleted, task], sort_keys=True)
+                           for deleted, tasks in ((False, job.tasks), (True, job.deleted)) for task in tasks}
         changed = needs_migration
         for task in job.tasks:       # the service stopped while these were waiting or running: they are not rerun
             if task["status"] in ("queued", "running"):
@@ -248,7 +295,7 @@ class Job:
                 update_task(task)
                 task["error"] = "The service stopped before this output was made; it was not run again."
                 changed = True
-        if changed:
+        if changed and in_db:
             job.save()
         return job
 
@@ -268,35 +315,44 @@ class Job:
 
 # ---------- tokens ----------
 _token_lock = threading.Lock()
-_token_samples: list[int] = []
+_token_samples: list[dict] = []         # the token usage of each fully counted Astra run
 
 
-def remember_tokens(count: int | None) -> None:
-    if isinstance(count, int):
+def complete(usage: dict | None) -> bool:
+    """A reading Codex reported in full (input with its cached part, and output). Older logs only kept a partial
+    input count (about the uncached part: ~24k against ~124k), so they would make the estimate 5x too low."""
+    return bool(usage) and usage.get("source") == "codex_json" and isinstance(usage.get("input_tokens"), int) \
+        and isinstance(usage.get("output_tokens"), int)
+
+
+def remember_tokens(usage: dict | None) -> None:
+    if complete(usage):
         with _token_lock:
-            _token_samples.append(count)
+            _token_samples.append(usage)
 
 
 def load_token_history() -> None:
-    """Every Astra token count recorded so far: the tasks of stored jobs and the Astra logs under work/."""
-    counts = []
-    for log in (ROOT / "work").rglob("astra.log"):
-        count = read_usage(log).get("input_tokens")
-        if count is not None:
-            counts.append(count)
+    """Every fully counted Astra run so far: the Astra logs under work/ (the stored jobs' runs among them)."""
+    usages = [usage for log in (ROOT / "work").rglob("astra.log") if complete(usage := read_usage(log))]
     with _token_lock:
-        _token_samples[:] = counts
+        _token_samples[:] = usages
 
 
 def token_stats() -> dict:
+    """Tokens of one output: the median input (cached included) with its 10th-90th percentile range, and the
+    median cached part and output, over the fully counted runs."""
     with _token_lock:
-        samples = sorted(_token_samples)
+        samples = list(_token_samples)
     if len(samples) < 5:
-        return {"median": FALLBACK_TOKENS, "low": FALLBACK_TOKENS // 2, "high": FALLBACK_TOKENS * 2,
-                "samples": len(samples), "basis": "first measurements"}
-    deciles = statistics.quantiles(samples, n=10)
-    return {"median": int(statistics.median(samples)), "low": int(deciles[0]), "high": int(deciles[-1]),
-            "samples": len(samples), "basis": "recorded runs"}
+        return {"median": FALLBACK_TOKENS, "low": FALLBACK_TOKENS * 3 // 4, "high": FALLBACK_TOKENS * 3 // 2,
+                "cached_median": None, "output_median": None, "samples": len(samples), "basis": "first measurements"}
+    inputs = sorted(u["input_tokens"] for u in samples)
+    cached = [u["cached_input_tokens"] for u in samples if isinstance(u.get("cached_input_tokens"), int)]
+    deciles = statistics.quantiles(inputs, n=10)
+    return {"median": int(statistics.median(inputs)), "low": int(deciles[0]), "high": int(deciles[-1]),
+            "cached_median": int(statistics.median(cached)) if cached else None,
+            "output_median": int(statistics.median(u["output_tokens"] for u in samples)),
+            "samples": len(samples), "basis": "fully counted runs"}
 
 
 def estimate(outputs: int) -> dict:
@@ -329,19 +385,48 @@ def run_task(job: Job, task: dict, ticket: int) -> None:
         view = copy.deepcopy(task)
     job.save()
     job.notify({"type": "task", "task": view})
-    case = ENGINES[job.engine]["cases"][task["case"]]
+    try:
+        current = catalog()
+    except Exception as error:            # the database is down: the task fails instead of hanging as running
+        finish_task(job, task, attempt, {"error": f"the database could not be read: {error}", "seconds": 0})
+        return
     kind = task["input_kind"]
-    change = case["changes"][kind]
-    if task.get("note"):                  # a rebuild's own request for this image comes after the case's change
+    case = current["engines"].get(job.engine, {}).get("cases", {}).get(task["case"])
+    if case is None or kind not in case["changes"] or kind not in current["input_kinds"]:
+        finish_task(job, task, attempt, {"error": f"case {task['case']} of {job.engine} has no prompt for "
+                                                  f"{kind} any more (edited on the Engines page)", "seconds": 0})
+        return
+    try:                                  # the object references as they are now, named by their image numbers
+        references, labels = reference_store.for_case(current, case["refs"])
+    except db.StoreError as error:
+        finish_task(job, task, attempt, {"error": str(error), "seconds": 0})
+        return
+    rejected = job.folder / task["rejected_image"] if task.get("rejected_image") else None
+    if rejected is not None and rejected.is_file():       # a rebuild: the output it redoes goes in as the last image
+        references = references + [{"id": "REJECTED", "text": REJECTED_TEXT, "render": False, "images": [rejected]}]
+        labels = reference_labels([(r["id"], len(r["images"]) or 1) for r in references])
+    change = with_labels(case["changes"][kind], labels)
+    if task.get("note") and "REJECTED" in labels:
+        change += (f" This is a redo: {labels['REJECTED']} is an earlier result of this same edit that the reviewer "
+                   f"rejected, and their feedback on it is: {task['note']} Fix exactly that in this new edit of image 1, "
+                   "and keep everything the change above asks for; where the feedback conflicts with it, the feedback "
+                   "wins.")
+    elif task.get("note"):                # the rejected output is gone: the feedback alone
         change += (f" Additional request for this image, which takes priority over anything above it conflicts "
                    f"with: {task['note']}")
     try:
         row = edit_frame(job.image(task), run,
                          job.folder / "outputs" / task["path"], task["seed"], change,
-                         INPUT_KINDS[kind]["scene"], refs=case["refs"], context=prompt_context(job.engine))
+                         current["input_kinds"][kind]["scene"], refs=case["refs"],
+                         context=current["engines"][job.engine]["prompt"], references=references)
     except Exception as error:            # edit_frame reports its own errors; this guards the pool
         row = {"error": f"{type(error).__name__}: {error}"}
-    remember_tokens((row.get("token_usage") or legacy_usage(row.get("tokens"))).get("input_tokens"))
+    remember_tokens(row.get("token_usage"))
+    finish_task(job, task, attempt, row)
+
+
+def finish_task(job: Job, task: dict, attempt: dict, row: dict) -> None:
+    """Record a task's result row (output or error), then save the job and tell its watchers."""
     with job.lock:
         if row.get("output"):
             task["status"] = "done"
@@ -367,16 +452,47 @@ def run_task(job: Job, task: dict, ticket: int) -> None:
 
 
 @app.on_event("startup")
-def load_jobs() -> None:
+def startup() -> None:
+    """Open the database (it fails here, with what is missing, when .env does not configure it), then the jobs."""
+    store = db.Store(database_url())
+    store.setup()
+    db.use(store)
     load_token_history()
+    load_jobs(store)
+
+
+def load_jobs(store: db.Store) -> None:
+    """Every job: from the database, which holds each job's full state; then each job on disk the database does not
+    hold yet (made before it did) from its job.json, put into the database under the project it names, or Default."""
+    states = job_records.job_states(store.db)
+    for job_id, state in states.items():
+        if state is None or job_id in jobs:
+            continue
+        try:
+            jobs[job_id] = Job.from_state(JOBS_DIR / job_id, state, in_db=True)
+        except Exception as error:                # one bad job never stops the service
+            print(f"job {job_id} not loaded from the database: {type(error).__name__}: {error}", flush=True)
     if not JOBS_DIR.is_dir():
         return
+    known, projects, default = store.job_projects(), {p["id"] for p in store.projects()}, None
     for folder in sorted(JOBS_DIR.iterdir()):
-        if (folder / "job.json").is_file() and folder.name not in jobs:
-            try:
-                jobs[folder.name] = Job.load(folder)
-            except (OSError, ValueError, KeyError) as error:
-                print(f"job {folder.name} not loaded: {error}", flush=True)
+        if not (folder / "job.json").is_file() or folder.name in jobs:
+            continue
+        try:
+            job = Job.load(folder)
+            if job.id in known:
+                job.project_id = known[job.id]
+            elif job.project_id not in projects:
+                default = default or store.default_project_id()
+                job.project_id = default
+            backup = folder / "job.json.before-projects"
+            if not backup.exists():               # the first rewrite drops the old keys (variants, rates): keep them
+                shutil.copy2(folder / "job.json", backup)
+            job.save(strict=True)
+        except Exception as error:
+            print(f"job {folder.name} not loaded: {type(error).__name__}: {error}", flush=True)
+            continue
+        jobs[job.id] = job
 
 
 # ---------- inputs ----------
@@ -396,6 +512,8 @@ def unique(path: Path) -> Path:
 def kind_folders(root: Path) -> tuple[dict[str, list[Path]], list[str]]:
     """The images of root's sub-folders named by input kind (root may wrap them in one more folder, as the zip of
     a folder does), and notes on what was left out."""
+    INPUT_KINDS = catalog()["input_kinds"]
+
     def named(base: Path) -> dict[str, Path]:
         return {p.name: p for p in sorted(base.iterdir()) if p.is_dir() and p.name in INPUT_KINDS}
     found = named(root)
@@ -459,9 +577,13 @@ def get_job(job_id: str) -> Job:
 
 # ---------- routes ----------
 @app.get("/")
-def index() -> FileResponse:
+@app.get("/{page}")
+def index(page: str = "") -> FileResponse:
+    """The pages: Generate (/), Projects, Engines and Prompts; the menu on each links them."""
+    if page not in PAGES:
+        raise HTTPException(404, f"no page {page}")
     # no-store: after a restart with a new page, a reload never runs the old script from the browser cache
-    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
+    return FileResponse(STATIC / PAGES[page], headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/codex")
@@ -470,45 +592,68 @@ async def codex_status(refresh: bool = False) -> dict:
     return await asyncio.to_thread(USAGE.status, pending_outputs(), refresh) | {"enforced": ENFORCE_CODEX_LIMIT}
 
 
+def project_engines(project_id: int | None) -> list[str] | None:
+    """The engines a project may use (404 for an unknown project); None (every engine) without a project."""
+    return None if project_id is None else db.current().project(project_id)["engines"]
+
+
 @app.get("/api/engines")
-def engines() -> dict:
-    return catalogue() | {"tokens_per_output": token_stats()}
+def engines(project_id: int | None = None) -> dict:
+    """The input kinds, engines and cases without the prompt text, for the Generate page; with project_id only the
+    engines that project may use."""
+    current, allowed = catalog(), project_engines(project_id)
+    shown = [e for e in current["engines"] if allowed is None or e in allowed]
+    return {
+        "input_kinds": [{"id": kind, "title": k["title"], "engine": k["engine"]}
+                        for kind, k in current["input_kinds"].items() if k["engine"] in shown],
+        "engines": [{"id": engine_id, "name": engine["name"], "color": engine["color"],
+                     "input_kinds": [kind for kind, k in current["input_kinds"].items() if k["engine"] == engine_id],
+                     "cases": [{"id": case_id, "title": c["title"], "catalogue": c["catalogue"],
+                                "status": c["status"], "input_kinds": list(c["changes"])}
+                               for case_id, c in engine["cases"].items()]}
+                    for engine_id, engine in current["engines"].items() if engine_id in shown],
+        "tokens_per_output": token_stats(),
+    }
 
 
 @app.get("/api/jobs")
-def list_jobs() -> list[dict]:
-    return [job.summary() for job in sorted(jobs.values(), key=lambda j: j.created, reverse=True)]
+def list_jobs(project_id: int | None = None) -> list[dict]:
+    return [job.summary() for job in sorted(jobs.values(), key=lambda j: j.created, reverse=True)
+            if project_id is None or job.project_id == project_id]
+
+
+def job_choices(form) -> tuple[int, str, list[str]]:
+    """The project, its engine and the chosen cases of a new job's form, each checked against the database."""
+    try:
+        project_id = int(str(form.get("project_id", "")))
+    except ValueError:
+        raise HTTPException(400, "choose a project")
+    if db.current().project(project_id)["hidden"]:
+        raise HTTPException(403, f"project {project_id} is hidden: it takes no new jobs")
+    allowed = project_engines(project_id)
+    engine = str(form.get("engine", ""))
+    engine_cases = catalog()["engines"].get(engine, {}).get("cases")
+    if engine_cases is None:
+        raise HTTPException(400, f"unknown engine {engine!r}")
+    if engine not in allowed:
+        raise HTTPException(403, f"project {project_id} may not use engine {engine!r}; add it on the Projects page")
+    cases = list(dict.fromkeys(str(c) for c in form.getlist("cases")))
+    unknown = [c for c in cases if c not in engine_cases]
+    if unknown or not cases:
+        raise HTTPException(400, f"choose cases of {engine}" + (f"; unknown: {', '.join(unknown)}" if unknown else ""))
+    return project_id, engine, cases
 
 
 @app.post("/api/jobs")
 async def create_job(request: Request) -> dict:
-    """Form fields: engine, cases (repeated), variants (at most this many outputs per frame), rate:<case id> (0-1, the chance
-    the case is drawn per frame, default 1), and the input as ONE of: folder (a path on the server),
+    """Form fields: project_id, engine (one the project may use, else 403), cases (repeated: each makes ONE output
+    of every frame of a kind it takes), and the input as ONE of: folder (a path on the server),
     zip (a zip file), files:<input kind> (images, repeated, for each kind). With dry_run=1 nothing is kept or run:
     the answer is the frames found, the outputs a job would make and their token estimate."""
     form = await request.form()
     dry_run = str(form.get("dry_run", "")) in ("1", "true")
-    engine = str(form.get("engine", ""))
-    if engine not in ENGINES:
-        raise HTTPException(400, f"unknown engine {engine!r}")
-    cases = list(dict.fromkeys(str(c) for c in form.getlist("cases")))
-    unknown = [c for c in cases if c not in ENGINES[engine]["cases"]]
-    if unknown or not cases:
-        raise HTTPException(400, f"choose cases of {engine}" + (f"; unknown: {', '.join(unknown)}" if unknown else ""))
-    try:
-        variants = int(form.get("variants", 1))
-    except ValueError:
-        variants = 0
-    if not 1 <= variants <= MAX_VARIANTS:
-        raise HTTPException(400, f"variants must be 1-{MAX_VARIANTS}")
-    rates = {}
-    for case_id in cases:                 # rate:<case id>, the chance the case is drawn per frame; 1 when not given
-        try:
-            rates[case_id] = float(form.get(f"rate:{case_id}", 1))
-        except ValueError:
-            rates[case_id] = -1.0
-        if not 0 <= rates[case_id] <= 1:
-            raise HTTPException(400, f"the rate of {case_id} must be 0-1")
+    project_id, engine, cases = job_choices(form)
+    INPUT_KINDS, engine_label = catalog()["input_kinds"], engine_name(engine)
     folder = str(form.get("folder", "")).strip()
     archive = form.get("zip")
     archive = archive if isinstance(archive, UploadFile) and archive.filename else None
@@ -550,15 +695,15 @@ async def create_job(request: Request) -> dict:
         for kind, images in inputs.items():
             if INPUT_KINDS[kind]["engine"] != engine and images:
                 notes.append(f"{len(images)} {kind} image(s) left out: that kind feeds "
-                             f"{ENGINES[INPUT_KINDS[kind]['engine']]['name']}")
+                             f"{engine_name(INPUT_KINDS[kind]['engine'])}")
         inputs = {kind: images for kind, images in inputs.items() if INPUT_KINDS[kind]["engine"] == engine and images}
         if not inputs:
             kinds = [kind for kind, k in INPUT_KINDS.items() if k["engine"] == engine]
-            raise HTTPException(400, f"no images for {ENGINES[engine]['name']}: it takes {', '.join(kinds)} inputs"
+            raise HTTPException(400, f"no images for {engine_label}: it takes {', '.join(kinds)} inputs"
                                      + (f" ({'; '.join(notes)})" if notes else ""))
-        planned = Job(scratch, engine, cases, variants, inputs, notes, rates=rates)
+        planned = Job(scratch, engine, cases, inputs, notes, project_id)
         if not planned.tasks:
-            raise HTTPException(400, "none of the chosen cases takes these input kinds, or their rates drew no case")
+            raise HTTPException(400, "none of the chosen cases takes these input kinds")
         if len(planned.tasks) > MAX_TASKS:
             raise HTTPException(400, f"{len(planned.tasks)} outputs is over {MAX_TASKS}; narrow the input")
         # the Codex plan's usage limit: when enforced, a job that would not fit is refused unless the request says force
@@ -574,9 +719,13 @@ async def create_job(request: Request) -> dict:
             shutil.rmtree(scratch, ignore_errors=True)
 
     job_folder.mkdir(parents=True, exist_ok=True)
-    job = Job(job_folder, engine, cases, variants, keep_inputs(inputs, job_folder), notes, rates=rates)
+    job = Job(job_folder, engine, cases, keep_inputs(inputs, job_folder), notes, project_id)
     job.loop = asyncio.get_running_loop()
-    job.save()
+    try:
+        job.save(strict=True)
+    except Exception as error:            # e.g. the project was deleted meanwhile: nothing is run
+        shutil.rmtree(job_folder, ignore_errors=True)
+        raise HTTPException(409, f"the job could not be recorded: {type(error).__name__}") from error
     await asyncio.to_thread(USAGE.refresh, True)      # a calibration point: the percent used before these outputs
     jobs[job.id] = job
     for task in job.tasks:
@@ -658,9 +807,16 @@ def rebuild_sources(job: Job, task_ids: list[str], action: str = "rebuild") -> l
         return [by_id[task_id] for task_id in task_ids]
 
 
+# the output a rebuild redoes, given to Astra after the references with the reviewer's feedback (user, 2026-10-09)
+REJECTED_TEXT = ("An earlier result of this same edit of image 1, rejected by a reviewer; the feedback in the change below "
+                 "says what is wrong with it. It only shows the mistake to avoid: never edit it, never copy it or start "
+                 "from it, and take nothing else from it; edit image 1.")
+
+
 def new_rebuild_task(job: Job, source: dict, note: str) -> dict:
     """One more task for the source's frame and case, appended to the job (the caller holds job.lock). Rounds count
-    from the first output, so a rebuild of a rebuild is ...__r2.png, ...__r3.png."""
+    from the first output, so a rebuild of a rebuild is ...__r2.png, ...__r3.png. The source's output, when it has
+    one, is copied to rebuild_refs/ (kept even if the output is deleted later) and goes in with the feedback."""
     origin = source.get("rebuild_of") or source["id"]
     rounds = 1 + sum(t.get("rebuild_of") == origin for t in job.tasks + job.deleted)     # never reuse a name
     stem = source["output_name"].removesuffix(".png").split("__r")[0]
@@ -671,6 +827,12 @@ def new_rebuild_task(job: Job, source: dict, note: str) -> dict:
             "seed": source["seed"] + 1000 * rounds, "status": "queued", "output_name": name,
             "path": f"{source['input_kind']}/{name}", "rebuild_of": origin, "rebuild_round": rounds,
             "rebuilt_from": source["id"], "note": note}
+    made = job.folder / "outputs" / source["path"]
+    if source["status"] == "done" and made.is_file():
+        kept = job.folder / "rebuild_refs" / source["input_kind"] / f"{Path(name).stem}__rejected{made.suffix}"
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(made, kept)
+        task["rejected_image"] = str(kept.relative_to(job.folder))
     migrate_task(task)
     job.tasks.append(task)
     return task

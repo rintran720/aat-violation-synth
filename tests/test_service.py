@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import threading
 import time
@@ -46,7 +47,13 @@ class ServiceTests(unittest.TestCase):
         self.gate = threading.Event()        # fake edits wait on it; a test clears it to hold outputs in the queue
         self.gate.set()
         self.lock = threading.Lock()
-        patches = [mock.patch.object(service, "JOBS_DIR", self.root / "jobs"),
+        patches = [mock.patch.dict(os.environ, {"DATABASE_URL": "sqlite://"}),      # a fresh database per test
+                   mock.patch.object(service, "JOBS_DIR", self.root / "jobs"),
+                   # object references: their files in the test folder, seeded from small stand-in sheets
+                   mock.patch.object(service.reference_store, "REFERENCES_DIR", self.root / "references"),
+                   mock.patch.object(service.reference_store, "LEGACY_DIR", self.root / "legacy-references"),
+                   mock.patch.object(service.reference_store, "catalogue_sheet", return_value=None),   # SKID renders
+                   mock.patch.dict(service.reference_store.SEED_IMAGES, self.seed_images(), clear=True),
                    mock.patch.object(service, "load_token_history"),
                    mock.patch.object(service, "_token_samples", []),
                    mock.patch.object(service, "edit_frame", side_effect=self.fake_edit),
@@ -61,19 +68,27 @@ class ServiceTests(unittest.TestCase):
         self.addCleanup(self.folder.cleanup)
         # one event loop for the whole test, as under uvicorn: the pool threads post their updates to it
         self.client = self.enterContext(TestClient(service.app))
+        self.client.patch("/api/projects/1", json={"hidden": False})     # Default is hidden; these tests use it
+
+    def seed_images(self) -> dict:
+        sheets = {}
+        for ref in ("LSP", "FLOOR_OPENING"):
+            sheets[ref] = self.root / f"seed-{ref}.png"
+            Image.new("RGB", (32, 18), "blue").save(sheets[ref])
+        return sheets
 
     def fake_limits(self) -> dict:
         return {"plan": "prolite", "ordinary_usage_allowed": not self.limit_reached, "limit_reached": self.limit_reached,
                 "used_percent": self.used_percent, "window_minutes": 10080, "resets_at": 1_800_000_000,
                 "secondary_used_percent": None, "secondary_resets_at": None, "read_at": time.time()}
 
-    def fake_edit(self, image, run, output, seed, change, scene, refs=None, context=None):
+    def fake_edit(self, image, run, output, seed, change, scene, refs=None, context=None, references=None):
         self.gate.wait(5)
         with self.lock:
             self.running += 1
             self.peak = max(self.peak, self.running)
             self.calls.append({"image": image.name, "output": output, "seed": seed, "change": change,
-                               "scene": scene, "refs": refs})
+                               "scene": scene, "refs": refs, "references": references})
         time.sleep(0.05)
         with self.lock:
             self.running -= 1
@@ -84,10 +99,19 @@ class ServiceTests(unittest.TestCase):
         return {"output": str(output), "seconds": 1, "tokens": 20_000}
 
     def create(self, **fields):
-        data = {"engine": PUSH, "cases": ["push_2_lsp_cargo", "push_3_lsp_cargo"], "variants": "4",
+        data = {"project_id": "1", "engine": PUSH, "cases": ["push_2_lsp_cargo", "push_3_lsp_cargo"],
                 "folder": str(self.inputs)}
         data.update(fields)
         return self.client.post("/api/jobs", data=data)
+
+    def restart_after(self, job_id: str, change) -> None:
+        """What the database holds of a job, changed as a stopped service would have left it; then a restart."""
+        store = service.db.current()
+        state = service.job_records.job_states(store.db)[job_id]
+        change(state["tasks"])
+        service.job_records.save_job(store.db, state, [(False, task) for task in state["tasks"]])
+        service.jobs.clear()
+        service.load_jobs(store)
 
     def wait_running(self, job_id: str, count: int) -> None:
         deadline = time.time() + 5
@@ -159,7 +183,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_images_uploaded_per_kind_feed_their_engine(self) -> None:
         response = self.client.post(
-            "/api/jobs", data={"engine": SKIDS, "cases": ["carry_2_skids_side_by_side"], "variants": "1"},
+            "/api/jobs", data={"engine": SKIDS, "cases": ["carry_2_skids_side_by_side"], "project_id": "1"},
             files=[("files:forklift-empty", ("my frame.png", png(), "image/png")),
                    ("files:forklift-with-cargo-no-lsp", ("e.png", png(), "image/png")),
                    ("files:forklift-with-lsp-cargo", ("f.png", png(), "image/png")),
@@ -179,7 +203,7 @@ class ServiceTests(unittest.TestCase):
             archive.writestr("batch/forklift-with-lsp-empty/readme.txt", "x")
             archive.writestr("../evil.png", png())
         response = self.client.post("/api/jobs", data={"engine": PUSH, "cases": ["push_2_lsp_empty_extra"],
-                                                       "variants": "1"},
+                                                       "project_id": "1"},
                                     files=[("zip", ("inputs.zip", data.getvalue(), "application/zip"))])
         self.assertEqual(response.status_code, 200, response.text)
         job = response.json()
@@ -200,16 +224,14 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(any((self.root / "jobs").glob("2*")) if (self.root / "jobs").exists() else False)
 
     def test_a_stored_job_reloads_and_its_unfinished_tasks_are_not_rerun(self) -> None:
-        job = self.create(variants="1").json()
+        job = self.create(cases=["push_2_lsp_cargo"]).json()
         self.wait_finished(job["id"])
-        folder = self.root / "jobs" / job["id"]
-        stored = json.loads((folder / "job.json").read_text())
-        stored["tasks"][0].update(status="running")          # as if the service had stopped during it
-        stored["tasks"][1].update(status="queued")
-        (folder / "job.json").write_text(json.dumps(stored))
         calls = len(self.calls)
-        service.jobs.clear()
-        service.load_jobs()                                   # what a restart does
+
+        def stopped(tasks):                                   # as if the service had stopped during these
+            tasks[0].update(status="running")
+            tasks[1].update(status="queued")
+        self.restart_after(job["id"], stopped)
         reloaded = self.client.get(f"/api/jobs/{job['id']}").json()
         self.assertEqual(reloaded["counts"]["interrupted"], 2)
         self.assertTrue(reloaded["finished"])
@@ -249,7 +271,7 @@ class ServiceTests(unittest.TestCase):
             plan = self.create(dry_run="1").json()
             self.assertTrue(plan["codex"]["fits"])
             self.assertIn("Not enforced", plan["codex"]["reason"])
-            response = self.create(variants="1")
+            response = self.create(cases=["push_2_lsp_cargo"])
             self.assertEqual(response.status_code, 200, response.text)
             self.assertFalse(self.client.get("/api/codex").json()["enforced"])
         self.wait_finished(response.json()["id"])
@@ -262,7 +284,7 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(self.client.get("/api/codex").json()["blocked"])
 
     def test_a_rebuild_adds_one_output_with_the_users_request_and_keeps_the_first(self) -> None:
-        job = self.create(variants="1", cases=["push_2_lsp_cargo"]).json()
+        job = self.create(cases=["push_2_lsp_cargo"]).json()
         final = self.wait_finished(job["id"])
         first = next(t for t in final["tasks"] if t["status"] == "done")
         self.assertEqual(self.client.post(f"/api/jobs/{job['id']}/tasks/{first['id']}/rebuild",
@@ -276,13 +298,21 @@ class ServiceTests(unittest.TestCase):
         state = self.wait_finished(job["id"])
         self.assertEqual(state["total"], final["total"] + 1)
         call = next(c for c in self.calls if c["output"].name == task["output_name"])
-        self.assertIn("Additional request for this image", call["change"])
-        self.assertIn("make the second LSP touch the first", call["change"])
+        # the rejected output goes in after the references (LSP image 2, SKID image 3) with the feedback on it
+        self.assertEqual([r["id"] for r in call["references"]], ["LSP", "SKID", "REJECTED"])
+        rejected = call["references"][-1]["images"][0]
+        self.assertEqual(rejected.read_bytes(), (self.root / "jobs" / job["id"] / "outputs" / first["path"]).read_bytes())
+        self.assertIn("image 4 is an earlier result of this same edit that the reviewer rejected", call["change"])
+        self.assertIn("feedback on it is: make the second LSP touch the first", call["change"])
         self.assertEqual(call["image"], first["input"])
+        self.client.post(f"/api/jobs/{job['id']}/delete", data={"task": [first["id"]]})
+        self.assertTrue(rejected.is_file())                          # kept for the rebuild though the output is deleted
         again = self.client.post(f"/api/jobs/{job['id']}/tasks/{task['id']}/rebuild", data={"note": "wider"}).json()
         self.assertEqual((again["task"]["rebuild_of"], again["task"]["rebuild_round"]), (first["id"], 2))
         self.wait_finished(job["id"])
-        self.assertEqual(self.client.get(first["url"]).status_code, 200)       # the first output stays
+        call = next(c for c in self.calls if c["output"].name == again["task"]["output_name"])
+        redo = call["references"][-1]["images"][0]                    # a redo of the redo: the r1 output goes in
+        self.assertEqual(redo.read_bytes(), (self.root / "jobs" / job["id"] / "outputs" / task["path"]).read_bytes())
         self.assertEqual(self.client.post(f"/api/jobs/{job['id']}/tasks/t9999/rebuild",
                                           data={"note": "x"}).status_code, 404)
 
@@ -338,14 +368,12 @@ class ServiceTests(unittest.TestCase):
     def test_resume_runs_the_interrupted_outputs_and_the_failed_ones_on_request(self) -> None:
         job = self.create().json()                                    # 12 outputs, 2 of them fail (b.png v2)
         self.wait_finished(job["id"])
-        folder = self.root / "jobs" / job["id"]
-        stored = json.loads((folder / "job.json").read_text())
-        for task in stored["tasks"][:4]:                              # as if the service stopped during these
-            if task["status"] == "done":
-                task.update(status="running")
-        (folder / "job.json").write_text(json.dumps(stored))
-        service.jobs.clear()
-        service.load_jobs()
+
+        def stopped(tasks):                                           # as if the service stopped during these
+            for task in tasks[:4]:
+                if task["status"] == "done":
+                    task.update(status="running")
+        self.restart_after(job["id"], stopped)
         state = self.client.get(f"/api/jobs/{job['id']}").json()
         interrupted = state["counts"]["interrupted"]
         self.assertGreater(interrupted, 0)
@@ -382,7 +410,7 @@ class ServiceTests(unittest.TestCase):
         stored = json.loads((folder / "job.json").read_text())
         self.assertEqual([t["id"] for t in stored["deleted_tasks"]], [t["id"] for t in gone])
         service.jobs.clear()
-        service.load_jobs()                                           # survives a restart
+        service.load_jobs(service.db.current())                                           # survives a restart
         self.assertEqual(self.client.get(f"/api/jobs/{job['id']}").json()["deleted"], 2)
         # a rebuild of a sibling gets a new id and name, never one of a deleted output
         source = done[1]
@@ -399,29 +427,17 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/jobs/{job['id']}/delete").status_code, 400)
         self.assertEqual(self.client.get(f"/api/jobs/{job['id']}").json()["total"], 11)
 
-    def test_one_output_per_frame_takes_one_case_in_turn(self) -> None:
-        plan = self.create(variants="1").json()                       # 6 frames, 2 cases: 6 outputs, not 12
-        self.assertEqual(plan["total"], 6)
-        cases = [t["case"] for t in plan["tasks"]]
-        self.assertEqual(sorted(cases.count(c) for c in set(cases)), [3, 3])   # each case the same share
-        self.assertEqual(len({t["input"] for t in plan["tasks"]}), 6)  # one per frame
-        self.wait_finished(plan["id"])
-
-    def test_case_rates_draw_cases_per_frame_and_a_dry_run_counts_the_same(self) -> None:
-        fields = {"rate:push_2_lsp_cargo": "0", "rate:push_3_lsp_cargo": "1"}
-        plan = self.create(dry_run="1", **fields).json()
-        job = self.create(**fields).json()
-        self.assertEqual({t["case"] for t in job["tasks"]}, {"push_3_lsp_cargo"})   # rate 0: never drawn
-        self.assertEqual(job["total"], 6)                              # rate 1: every frame
+    def test_every_chosen_case_makes_one_output_of_every_frame_it_takes(self) -> None:
+        plan = self.create(dry_run="1").json()
+        job = self.create().json()                                    # 6 frames, 2 cases: 12 outputs
         self.assertEqual(plan["outputs"], job["total"])
-        self.assertEqual(job["rates"], {"push_2_lsp_cargo": 0.0, "push_3_lsp_cargo": 1.0})
+        self.assertEqual(job["total"], 12)
+        pairs = [(t["input"], t["case"]) for t in job["tasks"]]
+        self.assertEqual(len(set(pairs)), 12)                         # each frame and case once
+        self.assertEqual(len({t["seed"] for t in job["tasks"]}), 12)
+        self.assertNotIn("variants", job)
+        self.assertNotIn("rates", job)
         self.wait_finished(job["id"])
-        half = {"rate:push_2_lsp_cargo": "0.5", "rate:push_3_lsp_cargo": "0.5"}
-        first, second = (self.create(dry_run="1", **half).json()["outputs"] for _ in range(2))
-        self.assertEqual(first, second)                                # seeded: the same draw each time
-        self.assertLess(first, 12)
-        for bad in ("1.5", "-0.1", "x"):
-            self.assertEqual(self.create(**{"rate:push_2_lsp_cargo": bad}).status_code, 400)
 
     def test_cancel_stops_the_waiting_outputs_and_resume_runs_them_once(self) -> None:
         self.gate.clear()                                             # the first 3 outputs hold their threads
@@ -465,7 +481,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(loaded.public()["tokens"]["used"], final["tokens"]["used"])
 
     def test_legacy_job_migration_is_persisted(self):
-        job = self.create(variants="1").json()
+        job = self.create(cases=["push_2_lsp_cargo"]).json()
         self.wait_finished(job["id"])
         folder = self.root / "jobs" / job["id"]
         stored = json.loads((folder / "job.json").read_text())
@@ -474,6 +490,7 @@ class ServiceTests(unittest.TestCase):
             task.pop("token_usage", None)
         (folder / "job.json").write_text(json.dumps(stored))
         loaded = service.Job.load(folder)
+        loaded.save()                                                 # as load_jobs does for a job new to the database
         saved = json.loads((folder / "job.json").read_text())
         self.assertEqual(saved["tasks"][0]["token_usage"]["input_tokens"], 20000)
         self.assertIsNone(saved["tasks"][0]["token_usage"]["output_tokens"])
@@ -524,7 +541,7 @@ class ServiceTests(unittest.TestCase):
         flat.mkdir()
         Image.new("RGB", (8, 8)).save(flat / "x.jpg")
         cases = [dict(folder=str(self.root / "missing")), dict(folder=str(flat)), dict(cases=["nope"]),
-                 dict(engine=SKIDS), dict(variants="0"), dict(folder="")]
+                 dict(engine=SKIDS), dict(project_id="x"), dict(folder="")]
         for fields in cases:
             with self.subTest(fields=fields):
                 self.assertEqual(self.create(**fields).status_code, 400)
@@ -537,7 +554,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/jobs/none").status_code, 404)
 
     def test_outputs_outside_the_job_are_not_served(self) -> None:
-        job = self.create(variants="1").json()
+        job = self.create(cases=["push_2_lsp_cargo"]).json()
         self.wait_finished(job["id"])
         base = f"/api/jobs/{job['id']}/outputs"
         self.assertEqual(self.client.get(f"{base}/forklift-with-lsp-cargo/..%2F..%2Fsecret.png").status_code, 404)
@@ -636,6 +653,18 @@ class CaseTests(unittest.TestCase):
         self.assertIn("from a real CCTV camera in an air-cargo terminal warehouse:\n1. Full scene: the warehouse floor "
                       "with", prompt)
         self.assertIn("Do not change the camera angle, the floor, the red laser lines", prompt)
+
+    def test_the_token_estimate_counts_only_fully_counted_runs(self) -> None:
+        from synth.token_usage import legacy_usage
+        for _ in range(20):
+            service.remember_tokens(legacy_usage(20_000))                   # old partial readings: left out
+        self.assertEqual(service.token_stats()["basis"], "first measurements")
+        for n in range(5):
+            service.remember_tokens({"source": "codex_json", "input_tokens": 120_000 + n * 1000,
+                                     "cached_input_tokens": 100_000, "output_tokens": 1_200})
+        stats = service.token_stats()
+        self.assertEqual((stats["median"], stats["cached_median"], stats["output_median"], stats["samples"]),
+                         (122_000, 100_000, 1_200, 5))
 
     def test_cases_only_take_their_engines_kinds(self) -> None:
         for engine_id, engine in violation_cases.ENGINES.items():

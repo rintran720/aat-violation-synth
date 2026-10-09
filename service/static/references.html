@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Object references · Synthetic Data Generation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/static/base.css">
+<style>
+  .slots { display: grid; grid-template-columns: minmax(0, 720px); margin: 6px 0 4px; }
+  .slot { position: relative; aspect-ratio: 16 / 9; border-radius: 8px; overflow: hidden; background: var(--sunken);
+          border: 1px solid var(--rule); }
+  .slot img { width: 100%; height: 100%; object-fit: contain; display: block; background: #0b0f14; }
+  .slot .no { position: absolute; top: 8px; left: 8px; padding: 2px 8px; border-radius: 999px; font-size: 0.75rem;
+              font-weight: 600; background: rgba(8, 12, 18, .72); color: #fff; }
+  .slot .tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; }
+  .slot.empty { display: grid; place-items: center; text-align: center; border-style: dashed; cursor: pointer;
+                color: var(--ink-soft); font-size: var(--step-0); padding: 12px; }
+  .slot.empty:hover, .slot.empty.over { border-color: var(--engine-text); color: var(--engine-text); }
+  .slot.empty strong { display: block; color: var(--ink); font-size: var(--step-1); }
+  .slot.render { cursor: default; border-style: solid; }
+  .uses { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .uses a { text-decoration: none; }
+  .actions { display: flex; gap: 8px; margin-top: 14px; }
+  .actions .spacer { flex: 1; }
+  .token { font-family: var(--font-mono); background: var(--sunken); padding: 1px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>Synthetic Data Generation</h1><span class="crumb">Object references</span>
+    <p>The image a case gives Astra after the frame, so it knows what an object looks like. Each object has ONE
+      reference sheet: one image showing the object from several angles, and a text that says what it shows. A case
+      picks its objects on the Engines page; its prompts name them as <span class="token">{ID}</span>, numbered
+      (image 2, 3, …) for each output.</p>
+  </header>
+
+  <div class="split">
+    <aside>
+      <div class="list" id="list" aria-label="Object references"></div>
+      <details class="add" id="newBox">
+        <summary>New object</summary>
+        <form id="newForm" autocomplete="off">
+          <label class="field" for="newId">Id</label>
+          <input id="newId" type="text" maxlength="32" required placeholder="e.g. PALLET" style="text-transform:uppercase">
+          <div class="help">A-Z, 0-9 and _; prompts name it as {ID}. It cannot change later.</div>
+          <label class="field" for="newTitle">Name</label>
+          <input id="newTitle" type="text" maxlength="160" required>
+          <label class="field" for="newText">What its reference sheet shows (prompt text)</label>
+          <textarea id="newText" required placeholder="A wooden pallet of this warehouse. Copy only its look …"></textarea>
+          <div style="margin-top:12px"><button class="btn primary" type="submit">Create object</button></div>
+        </form>
+      </details>
+    </aside>
+
+    <section>
+      <div class="panel empty" id="none">Choose an object, or create one.</div>
+      <form class="panel" id="view" hidden autocomplete="off">
+        <div class="panel-head"><h2 id="title"></h2><span class="token" id="token"></span></div>
+        <label class="field">Reference sheet</label>
+        <div class="slots" id="slots"></div>
+        <div class="help" id="slotHelp">One image showing the object from several angles (e.g. a grid of views). JPEG,
+          PNG or WebP, up to 20 MB. A new upload takes its place; every earlier sheet stays kept in
+          <code>references/&lt;ID&gt;/previous/</code> on the server.</div>
+        <input type="file" id="file" accept=".jpg,.jpeg,.png,.webp" hidden>
+        <div class="row">
+          <div><label class="field" for="name">Name</label><input id="name" type="text" maxlength="160" required></div>
+        </div>
+        <label class="field" for="text">What its reference sheet shows (prompt text)</label>
+        <textarea id="text" style="min-height:140px"></textarea>
+        <div class="help">Goes into the prompt as “N. &lt;this text&gt;” after the frame. <span class="token">{skid}</span>
+          is replaced by the catalogue's words for the rendered skid.</div>
+        <label class="field">Given by</label>
+        <div class="uses" id="uses"></div>
+        <div class="actions">
+          <button class="btn primary" type="submit">Save</button><span class="spacer"></span>
+          <button class="btn danger" type="button" id="delete">Delete object</button>
+        </div>
+      </form>
+    </section>
+  </div>
+</main>
+<script src="/static/ui.js"></script>
+<script src="/static/nav.js"></script>
+<script>
+let refs = [], current = null;
+
+function renderList() {
+  $("#list").innerHTML = refs.map((r) => `
+    <button type="button" data-id="${esc(r.id)}" aria-current="${current === r.id}">
+      <span class="dot" style="--dot:${r.images.length || r.render ? "var(--ok)" : "var(--bad)"}"></span>
+      <span class="name">${esc(r.title)}</span><span class="count">${r.images.length ? "1 image" : r.render ? "render" : "no image"}</span>
+      <span class="meta">{${esc(r.id)}} · ${esc(r.source)} · ${r.used_by.length} case${r.used_by.length === 1 ? "" : "s"}</span>
+    </button>`).join("") || `<div class="empty">No objects yet.</div>`;
+  $$("#list button").forEach((b) => b.addEventListener("click", () => select(b.dataset.id)));
+}
+
+function select(id) {
+  const r = refs.find((x) => x.id === id);
+  current = r ? r.id : null;
+  setParam("ref", current);
+  renderList();
+  $("#none").hidden = !!r; $("#view").hidden = !r;
+  if (!r) return;
+  $("#title").textContent = r.title; $("#token").textContent = `{${r.id}}`;
+  $("#name").value = r.title; $("#text").value = r.text;
+  const img = r.images[0];
+  $("#slots").innerHTML = img
+    ? `<div class="slot" data-drop><img src="${esc(img.url)}" alt="${esc(r.title)} reference sheet">
+        <span class="tools"><button type="button" class="btn" data-replace>Replace</button>
+        <button type="button" class="btn danger" data-remove="${esc(img.name)}">Remove</button></span></div>`
+    : `<div class="slot empty" data-upload data-drop tabindex="0" role="button"><span>${r.render
+        ? `<strong>Rendered per frame</strong>from the 3D catalogue while no sheet is uploaded. Drop or click to upload one instead.`
+        : `<strong>Add the reference sheet</strong>drop or click`}</span></div>`;
+  $("#uses").innerHTML = r.used_by.map((u) => `<a class="tag" href="/engines?engine=${encodeURIComponent(u.engine)}">${esc(u.engine_name)} · ${esc(u.title)}</a>`).join("")
+    || `<span class="help">No case gives it yet: tick it on the Engines page.</span>`;
+  $("#delete").disabled = r.used_by.length > 0;
+  $("#delete").title = r.used_by.length ? "Take it off its cases on the Engines page first" : "";
+  bindSlots();
+}
+
+function bindSlots() {
+  $$("[data-remove]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Take this sheet out of use? It stays kept in references/<ID>/previous/ on the server.")) return;
+    const data = await act(api("DELETE", `/api/references/${current}/images/${encodeURIComponent(b.dataset.remove)}`), "Image removed");
+    if (data) { refs = data; select(current); }
+  }));
+  $$("[data-replace]").forEach((b) => b.addEventListener("click", () => $("#file").click()));
+  $$("[data-upload]").forEach((slot) => {
+    slot.addEventListener("click", () => $("#file").click());
+    slot.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("#file").click(); } });
+  });
+  $$("[data-drop]").forEach((slot) => {
+    slot.addEventListener("dragover", (e) => { e.preventDefault(); slot.classList.add("over"); });
+    slot.addEventListener("dragleave", () => slot.classList.remove("over"));
+    slot.addEventListener("drop", (e) => { e.preventDefault(); slot.classList.remove("over"); if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); });
+  });
+}
+
+async function upload(file) {
+  const form = new FormData(); form.append("image", file, file.name);
+  let res;
+  try { res = await fetch(`/api/references/${current}/images`, { method: "POST", body: form }); }
+  catch (_) { toast("The service did not answer.", true); return; }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { toast(typeof data.detail === "string" ? data.detail : `The service answered ${res.status}.`, true); return; }
+  refs = data; select(current); toast("Reference sheet saved");
+}
+$("#file").addEventListener("change", () => { if ($("#file").files[0]) upload($("#file").files[0]); $("#file").value = ""; });
+
+$("#view").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const data = await act(api("PATCH", `/api/references/${current}`, { title: $("#name").value, text: $("#text").value }), "Saved");
+  if (data) { refs = data; select(current); }
+});
+$("#delete").addEventListener("click", async () => {
+  if (!confirm(`Delete ${current}? Its sheets stay kept in references/.deleted/ on the server.`)) return;
+  const data = await act(api("DELETE", `/api/references/${current}`), "Object deleted");
+  if (data) { refs = data; select(refs[0]?.id); }
+});
+$("#newForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const id = $("#newId").value.trim().toUpperCase();
+  const data = await act(api("POST", "/api/references", { id, title: $("#newTitle").value, text: $("#newText").value }), "Object created — now add its reference sheet");
+  if (data) { refs = data; $("#newForm").reset(); $("#newBox").open = false; select(id); }
+});
+
+api("GET", "/api/references").then((data) => {
+  refs = data;
+  const wanted = param("ref");
+  select(refs.some((r) => r.id === wanted) ? wanted : refs[0]?.id);
+}).catch((err) => toast(err.message, true));
+</script>
+</body>
+</html>

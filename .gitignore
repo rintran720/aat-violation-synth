@@ -4,3 +4,4 @@ work/
 data/
 __pycache__/
 tools/CLI-Anything/
+.env

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Violation Generator</title>
+<title>Synthetic Data Generation</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
@@ -64,7 +64,8 @@
   header.top h1 { font: 600 var(--step-4)/1.1 var(--font-display); letter-spacing: .01em; margin: 0; }
   .jobpick { display: flex; align-items: center; gap: 8px; font-size: var(--step-0); color: var(--ink-soft); }
   .jobpick select { width: auto; max-width: 70vw; padding: 6px 8px; font-size: var(--step-0); }
-  header.top p { margin: 0; color: var(--ink-soft); max-width: 80ch; }
+  header.top p { margin: 0; color: var(--ink-soft); flex: 0 0 100%; max-width: none;
+                  padding-right: max(0px, calc(100% - 80ch)); }  /* always its own line, under the title */
 
   .bench { display: grid; grid-template-columns: minmax(300px, 380px) minmax(0, 1fr); gap: 20px; align-items: start; }
   @media (max-width: 1000px) { .bench { grid-template-columns: minmax(0, 1fr); } }
@@ -88,13 +89,6 @@
     border: 1px solid var(--rule); border-radius: 6px; }
   input[type=number] { width: 96px; font-variant-numeric: tabular-nums; }
 
-  .seg { display: grid; grid-template-columns: repeat(3, 1fr); background: var(--sunken); border-radius: 7px; padding: 3px;
-         gap: 3px; margin-bottom: 12px; }
-  .seg button { border: 0; background: transparent; color: var(--ink-soft); padding: 6px 4px; border-radius: 5px;
-                font: 500 var(--step-0) var(--font-body); cursor: pointer; }
-  .seg button[aria-selected="true"] { background: var(--surface); color: var(--ink); font-weight: 600;
-                                      box-shadow: 0 1px 2px rgba(15, 23, 32, .12); }
-
   .drop { border: 1.5px dashed var(--rule); border-radius: 7px; padding: 12px; text-align: center; color: var(--ink-soft);
           cursor: pointer; font-size: var(--step-0); background: var(--ground); }
   .drop:hover, .drop.over { border-color: var(--engine-text); color: var(--engine-text); }
@@ -116,6 +110,22 @@
   .map td code { white-space: nowrap; }
   .map td:last-child { padding-left: 10px; }
   .map tr.unused td { color: var(--ink-soft); }
+  .help-btn { margin-left: auto; width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--rule);
+              background: var(--surface); color: var(--ink-soft); font: 600 var(--step-1)/1 var(--font-body); cursor: pointer; }
+  .help-btn:hover, .help-btn:focus-visible { color: var(--engine-text); border-color: var(--engine-text); }
+  dialog.guide { width: min(640px, calc(100vw - 32px)); max-height: 86vh; padding: 0; border: 1px solid var(--rule);
+                 border-radius: var(--radius); background: var(--surface); color: var(--ink); overflow: auto; }
+  dialog.guide::backdrop { background: rgba(8, 12, 18, .6); }
+  .guide-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px;
+                border-bottom: 1px solid var(--rule); position: sticky; top: 0; background: var(--surface); }
+  .guide-head h2 { margin: 0; font: 600 var(--step-3)/1.2 var(--font-display); }
+  .guide-head button { border: 1px solid var(--rule); background: var(--surface); color: var(--ink); border-radius: 6px;
+                       padding: 6px 12px; font: 600 var(--step-0) var(--font-body); cursor: pointer; }
+  .guide-body { padding: 4px 18px 18px; }
+  .guide-body ol { padding-left: 20px; margin: 10px 0; }
+  .guide-body .map { margin-top: 6px; }
+  .guide-body pre { margin: 12px 0 0; padding: 12px 14px; border-radius: 7px; background: var(--sunken);
+                    font: 400 var(--step-0)/1.6 var(--font-mono); overflow-x: auto; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
 
   .cases { display: grid; gap: 8px; margin-top: 12px; }
@@ -125,8 +135,6 @@
   .case input { margin: 3px 0 0; accent-color: var(--engine); }
   .case-title { font-weight: 600; }
   .case-meta { grid-column: 2; color: var(--ink-soft); font-size: var(--step-0); }
-  .case-rate { grid-column: 2; display: flex; align-items: center; gap: 6px; color: var(--ink-soft); font-size: var(--step-0); }
-  .case-rate input { width: 72px; padding: 3px 6px; margin: 0; }
   .tag { display: inline-block; font: 600 11px/1.6 var(--font-body); padding: 0 7px; border-radius: 99px; margin-left: 6px;
          background: var(--warn-soft); color: var(--warn); vertical-align: 1px; }
   .none { color: var(--ink-soft); font-style: italic; margin-top: 12px; }
@@ -154,6 +162,20 @@
   .codex-rows span:first-child { color: var(--ink-soft); }
   .codex-note { font-size: 12px; color: var(--ink-soft); margin-top: 6px; }
   .codex.blocked { border-color: var(--bad); }
+  .gear-btn { margin-left: auto; align-self: center; display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px;
+              border: 1px solid var(--rule); border-radius: 999px; background: var(--surface); color: var(--ink-soft);
+              font: 600 var(--step-0) var(--font-body); cursor: pointer; font-variant-numeric: tabular-nums; }
+  .gear-btn svg { width: 18px; height: 18px; transition: transform .3s ease; }
+  .gear-btn:hover, .gear-btn:focus-visible { color: var(--ink); border-color: var(--ink-soft); }
+  .gear-btn:hover svg { transform: rotate(45deg); }
+  .gear-btn.mid { color: var(--warn); border-color: var(--warn); }
+  .gear-btn.high, .gear-btn.blocked { color: var(--bad); border-color: var(--bad); background: var(--bad-soft); }
+  .codex-dialog { width: min(440px, calc(100vw - 32px)); }
+  .codex-dialog .guide-head { justify-content: flex-start; }
+  .codex-dialog .guide-head h2 { margin-right: auto; }
+  .codex-dialog .codex-plan { margin-left: 0; }
+  .codex-dialog .guide-body { padding-top: 14px; }
+  @media (prefers-reduced-motion: reduce) { .gear-btn svg { transition: none; } }
   .limit { margin-top: 10px; padding: 9px 11px; border-radius: 6px; font-size: var(--step-0); }
   .limit.over { background: var(--bad-soft); color: var(--bad); }
   .limit.unknown { background: var(--warn-soft); color: var(--warn); }
@@ -365,60 +387,35 @@
 <body>
 <main>
   <header class="top">
-    <h1>Violation Generator</h1>
-    <div class="jobpick"><label for="jobPick">Open a job</label>
-      <select id="jobPick"><option value="">New job…</option></select></div>
+    <h1>Synthetic Data Generation</h1>
+    <div class="jobpick"><label for="projectPick">Project</label>
+      <select id="projectPick"></select></div>
+    <button type="button" class="gear-btn" id="codexBtn" aria-haspopup="dialog" aria-controls="codexDialog"
+      title="Codex Astra 6 usage limit"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94a7.43 7.43 0 0 0 .05-.94 7.43 7.43 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.03 7.03 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.5.42l-.36 2.54a7.03 7.03 0 0 0-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 8.48a.5.5 0 0 0 .12.64l2.03 1.58a7.43 7.43 0 0 0 0 1.88L2.82 14.16a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.38 1.05.7 1.63.94l.36 2.54a.5.5 0 0 0 .5.42h3.8a.5.5 0 0 0 .5-.42l.36-2.54a7.03 7.03 0 0 0 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>
+      <span class="gear-badge" id="codexBadge" aria-label="Share of the Codex limit used">…</span></button>
     <p>Turns valid CCTV frames into violation images. Each output is one Astra edit; three run at a time and each
       appears beside its input frame as soon as it is ready.</p>
   </header>
 
   <div class="bench">
     <aside class="setup">
-      <section class="step codex" id="codexCard" aria-live="polite">
-        <div class="step-head"><h2>Codex Astra 6</h2><span class="codex-plan" id="codexPlan"></span></div>
-        <div id="codexBody" class="codex-note">Reading the plan's usage limit…</div>
-      </section>
       <form id="form" class="setup" autocomplete="off" novalidate style="position:static;max-height:none;overflow:visible">
         <section class="step" id="stepInput">
-          <div class="step-head"><span class="step-no">1</span><h2>Input frames</h2></div>
-          <div class="seg" role="tablist" aria-label="How to give the input">
-            <button type="button" role="tab" id="tabFolder" data-mode="folder" aria-selected="true">Folder path</button>
-            <button type="button" role="tab" id="tabUpload" data-mode="upload" aria-selected="false">Upload by kind</button>
-            <button type="button" role="tab" id="tabZip" data-mode="zip" aria-selected="false">Zip file</button>
-          </div>
-          <div data-pane="folder">
-            <label class="field" for="folder">Folder on the server</label>
-            <input id="folder" type="text" placeholder="work/inputs/cam01" spellcheck="false">
-            <div class="help">Absolute, or relative to the repository. It must contain the input-kind folders listed below.</div>
-          </div>
-          <div data-pane="upload" hidden>
-            <div class="kinds" id="kindUploads"></div>
-          </div>
-          <div data-pane="zip" hidden>
+          <div class="step-head"><span class="step-no">1</span><h2>Input frames</h2>
+            <button type="button" class="help-btn" id="inputHelpBtn" aria-haspopup="dialog" aria-label="How to prepare the input zip" title="How to prepare the input zip">?</button></div>
+          <div>
             <div class="drop" id="zipDrop" tabindex="0" role="button"><strong>Drop a .zip</strong> or click to choose
               <input id="zipFile" type="file" accept=".zip" hidden></div>
             <div class="help" id="zipName">The zip holds the input-kind folders, at its top or inside one folder.</div>
           </div>
-          <table class="map" aria-label="Input kinds">
-            <thead><tr><th>Folder name</th><th>Feeds engine</th></tr></thead>
-            <tbody id="kindMap"></tbody>
-          </table>
         </section>
 
         <section class="step" id="stepEngine">
-          <div class="step-head"><span class="step-no">2</span><h2>Engine and violation cases</h2></div>
+          <div class="step-head"><span class="step-no">2</span><h2>Engine and Output cases</h2></div>
           <label class="field" for="engine">Engine</label>
           <select id="engine"></select>
           <div id="cases" class="cases"></div>
-        </section>
-
-        <section class="step" id="stepGo">
-          <div class="step-head"><span class="step-no">3</span><h2>Variants and generate</h2></div>
-          <label class="field" for="variants">Outputs per frame (at most)</label>
-          <input id="variants" type="number" min="1" max="10" value="1">
-          <div class="help">For each frame every chosen case is drawn with its rate (1: every frame, 0.5: about half, 0: never),
-            and at most this many of the drawn cases are made, the least used first, so each case gets about the same share.
-            One case at most once per frame; a frame with no case drawn gets no output. Each output is its own Astra edit.</div>
+          <div class="help">Each chosen case makes ONE image from every input frame of a kind it takes.</div>
           <div class="plan" id="plan" aria-live="polite"></div>
           <div class="limit" id="limit" hidden></div>
           <button id="go" class="go" type="submit">Generate</button>
@@ -441,13 +438,13 @@
             every case says which kinds it can turn into a violation. Results show each input frame with the outputs
             made from it.</p>
           <ol class="how">
-            <li>Give the frames: a folder path, a zip, or uploads per kind.</li>
-            <li>Choose the engine and its violation cases; check the outputs and tokens it will take.</li>
-            <li>Set the variants and generate. Outputs arrive beside their input one by one.</li>
+            <li>Give the frames as a zip of input-kind folders.</li>
+            <li>Choose the engine and its output cases; check the outputs and tokens it will take.</li>
+            <li>Generate: each chosen case makes one image per input frame, and they arrive beside their input one by one.</li>
           </ol>
         </div>
         <div class="tree-wrap">
-<pre class="tree">cam01/                         <span class="c">← folder path, or the zip</span>
+<pre class="tree">cam01/                         <span class="c">← the zip</span>
 ├─ forklift-with-lsp-cargo/    <span class="c">→ Pushing Multiple Lsps</span>
 │  ├─ frame_0145.jpg
 │  └─ frame_0517.jpg
@@ -489,7 +486,7 @@
         <div class="summary-row">
           <div class="filters">
             <div class="tally" id="tally" role="group" aria-label="Show outputs"></div>
-            <span class="ctl"><select id="caseFilter" aria-label="Show outputs of one violation case"></select></span>
+            <span class="ctl"><select id="caseFilter" aria-label="Show outputs of one output case"></select></span>
             <button type="button" id="pickShown" class="btn-quiet" title="Choose every output the filters show, to rebuild them with one request">Select all shown</button>
           </div>
           <div class="tokens" id="tokens"></div>
@@ -504,7 +501,7 @@
       <form class="pick-bar" id="pickBar" autocomplete="off" novalidate hidden aria-label="Rebuild or delete the chosen outputs">
         <div class="row"><span class="count" id="pickCount"></span>
           <button type="button" class="btn-quiet" id="pickClear">Clear</button></div>
-        <label class="field" for="pickNote" style="margin:0">One request for all of them: what should change?</label>
+        <label class="field" for="pickNote" style="margin:0">Feedback for all of them: what is wrong? Each chosen image goes back to Astra with it.</label>
         <textarea id="pickNote" maxlength="1000" placeholder="e.g. the new LSP must touch the loaded one with no gap, same size and thickness"></textarea>
         <div class="err" id="pickErr" hidden></div>
         <div class="row" style="justify-content:flex-end">
@@ -541,6 +538,31 @@
   </div>
   <div class="rv-toast" id="rvToast" hidden></div>
 </dialog>
+<dialog class="guide codex-dialog" id="codexDialog" aria-labelledby="codexTitle">
+  <div class="guide-head"><h2 id="codexTitle">Codex Astra 6</h2><span class="codex-plan" id="codexPlan"></span>
+    <button type="button" id="codexRefresh">Refresh</button><button type="button" id="codexClose">Close (Esc)</button></div>
+  <div class="guide-body codex" id="codexCard" aria-live="polite">
+    <div id="codexBody" class="codex-note">Reading the plan's usage limit…</div>
+  </div>
+</dialog>
+
+<dialog class="guide" id="inputHelp" aria-labelledby="inputHelpTitle">
+  <div class="guide-head"><h2 id="inputHelpTitle">How to prepare the input zip</h2>
+    <button type="button" id="inputHelpClose">Close (Esc)</button></div>
+  <div class="guide-body">
+    <ol>
+      <li>Make one folder per input kind, named exactly as below, and put each frame in the folder of what it shows.</li>
+      <li>Zip them: the kind folders at the top of the zip, or inside one folder.</li>
+      <li>A job uses only the folders of the engine you choose; the others are left out.</li>
+    </ol>
+    <table class="map" aria-label="Input kinds">
+      <thead><tr><th>Folder name</th><th>Feeds engine</th></tr></thead>
+      <tbody id="kindMap"></tbody>
+    </table>
+    <pre id="kindTree" aria-label="Example zip layout"></pre>
+  </div>
+</dialog>
+
 <dialog id="viewer">
   <div class="viewer">
     <img alt="">
@@ -558,7 +580,9 @@ const LABEL = { done: "Done", running: "Running", queued: "Waiting", failed: "Fa
 const fmt = (n) => (n ?? 0).toLocaleString("en-US");
 const kTok = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
 const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
-let kinds = [], engines = [], perOutput = null, mode = "folder", uploads = {}, zipFile = null;
+let kinds = [], engines = [], perOutput = null, zipFile = null;
+let zipCounts = null;      // images per top folder name of the chosen zip, read in the browser; "unreadable" if not
+let uploading = false;     // a job's zip is on its way to the service
 let job = null, socket = null, closedByUs = false, filter = "all", caseFilter = "all", checkTimer = null, checkSeq = 0;
 let picked = new Set();     // ids of the outputs chosen to rebuild together
 let codex = null, fit = null, plannedOutputs = null;
@@ -572,20 +596,18 @@ async function loadCodex(force = false) {
   // re-judge the planned job against the new reading; no new dry run (a zip would be uploaded again)
   if (plannedOutputs) { showFit(fitFor(plannedOutputs)); refreshButton(); }
 }
-// expected outputs of one frame: each case drawn with its rate, at most `cap` kept
-function expectedPerFrame(rates, cap) {
-  let dist = [1];                           // dist[k]: chance that k cases are drawn
-  for (const p of rates) dist = [...dist, 0].map((v, k) => v * (1 - p) + (k ? dist[k - 1] * p : 0));
-  return dist.reduce((sum, v, k) => sum + v * Math.min(k, cap), 0);
-}
 function refreshButton() {
   const ready = !!engine() && chosen().length > 0 && !!plannedOutputs;
   $("#go").disabled = !ready || !!(fit && !fit.fits);
 }
 function renderCodex() {
-  const card = $("#codexCard"), body = $("#codexBody");
+  const card = $("#codexCard"), body = $("#codexBody"), badge = $("#codexBadge"), gear = $("#codexBtn");
   const r = codex && codex.reading;
   card.classList.toggle("blocked", !!(codex && codex.blocked));
+  const pct = r ? r.used_percent ?? 0 : null;     // the gear shows the share used; its colour warns
+  badge.textContent = pct === null ? "–" : `${pct}%`;
+  gear.className = `gear-btn ${codex && codex.blocked ? "blocked" : pct >= 85 ? "high" : pct >= 60 ? "mid" : ""}`;
+  gear.title = codex && codex.blocked ? "Codex usage limit reached" : `Codex Astra 6: ${pct ?? "?"}% of the limit used`;
   $("#codexPlan").textContent = r && r.plan ? `${r.plan} plan` : "";
   if (!r) {
     body.className = "codex-note";
@@ -639,13 +661,6 @@ function engine() { return engines.find((e) => e.id === $("#engine").value); }
 function engineName(id) { return (engines.find((e) => e.id === id) || {}).name || id; }
 function kindEngine(kind) { return kinds.find((k) => k.id === kind)?.engine; }
 
-document.querySelectorAll(".seg button").forEach((b) => b.addEventListener("click", () => {
-  mode = b.dataset.mode;
-  document.querySelectorAll(".seg button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
-  document.querySelectorAll("[data-pane]").forEach((p) => p.hidden = p.dataset.pane !== mode);
-  refresh();
-}));
-
 function dropZone(zone, input, onFiles, enabled = () => true) {
   zone.addEventListener("click", (e) => { if (e.target !== input && enabled()) input.click(); });
   zone.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && enabled()) { e.preventDefault(); input.click(); } });
@@ -657,10 +672,56 @@ function dropZone(zone, input, onFiles, enabled = () => true) {
 dropZone($("#zipDrop"), $("#zipFile"), (files) => {
   const f = [...files].find((x) => /\.zip$/i.test(x.name));
   if (!f) return;
-  zipFile = f;
+  zipFile = f; zipCounts = null;
   $("#zipName").textContent = `${f.name} · ${(f.size / 1e6).toFixed(1)} MB`;
   refresh();
+  zipNames(f).then((names) => { if (zipFile === f) zipCounts = zipFolders(names); })
+    .catch(() => { if (zipFile === f) zipCounts = "unreadable"; })
+    .finally(() => { if (zipFile === f) refresh(); });
 });
+
+// ---------- the zip's file list, read in the browser (only its directory at the end: no upload, any size) ----------
+async function zipNames(file) {
+  const u16 = (v, o) => v.getUint16(o, true), u32 = (v, o) => v.getUint32(o, true);
+  const tailSize = Math.min(file.size, 65557);
+  const tail = new DataView(await file.slice(file.size - tailSize).arrayBuffer());
+  let end = -1;
+  for (let i = tailSize - 22; i >= 0; i--) if (u32(tail, i) === 0x06054b50) { end = i; break; }
+  if (end < 0) throw new Error("not a zip");
+  let count = u16(tail, end + 10), size = u32(tail, end + 12), offset = u32(tail, end + 16);
+  if (count === 0xffff || size === 0xffffffff || offset === 0xffffffff) {        // ZIP64
+    const locator = end - 20;
+    if (locator < 0 || u32(tail, locator) !== 0x07064b50) throw new Error("zip64 locator missing");
+    const at = Number(tail.getBigUint64(locator + 8, true));
+    const record = new DataView(await file.slice(at, at + 56).arrayBuffer());
+    if (u32(record, 0) !== 0x06064b50) throw new Error("bad zip64 record");
+    size = Number(record.getBigUint64(40, true)); offset = Number(record.getBigUint64(48, true));
+  }
+  const dir = new DataView(await file.slice(offset, offset + size).arrayBuffer());
+  const names = [], text = new TextDecoder();
+  for (let at = 0; at + 46 <= dir.byteLength && u32(dir, at) === 0x02014b50;) {
+    const n = u16(dir, at + 28);
+    names.push(text.decode(new Uint8Array(dir.buffer, dir.byteOffset + at + 46, n)));
+    at += 46 + n + u16(dir, at + 30) + u16(dir, at + 32);
+  }
+  return names;
+}
+// images per folder, the way the service sorts a zip (service/app.py kind_folders): the input-kind folders at the
+// top of the zip, or inside its one wrapping folder; images at any depth in them
+function zipFolders(names) {
+  const files = names.map((n) => n.replace(/\\/g, "/")).filter((n) => !n.endsWith("/") && /\.(jpe?g|png)$/i.test(n))
+    .map((n) => n.split("/").filter((part) => part && part !== "."));
+  const tops = [...new Set(files.filter((parts) => parts.length > 1).map((parts) => parts[0]))]
+    .filter((t) => !t.startsWith(".") && !t.startsWith("__MACOSX"));
+  const known = new Set(kinds.map((k) => k.id));
+  const wrapper = !tops.some((t) => known.has(t)) && tops.length === 1 ? tops[0] : null;
+  const counts = { "": files.length };          // "": every image of the zip, wherever it is
+  for (const parts of files) {
+    const rest = wrapper ? (parts[0] === wrapper ? parts.slice(1) : []) : parts;
+    if (rest.length > 1 && !rest[0].startsWith(".") && !rest[0].startsWith("__MACOSX")) counts[rest[0]] = (counts[rest[0]] || 0) + 1;
+  }
+  return counts;
+}
 
 function renderKinds() {
   const current = engine();
@@ -669,121 +730,110 @@ function renderKinds() {
     return `<tr class="${k.engine === current?.id ? "" : "unused"}"><td><code>${esc(k.id)}</code></td>
       <td><span class="dot" style="background:${esc(e.color)}"></span>${esc(e.name)}</td></tr>`;
   }).join("");
-  $("#kindUploads").innerHTML = kinds.map((k) => {
-    const used = k.engine === current?.id;
-    return `<div class="kind ${used ? "" : "unused"}">
-      <div class="kind-head"><code>${esc(k.id)}</code><span class="kind-count" data-count="${k.id}"></span></div>
-      <div class="drop" data-kind="${k.id}" role="button" tabindex="${used ? 0 : -1}" aria-disabled="${!used}">
-        ${used ? `<strong>Drop images</strong> or click to choose` : `Used by ${esc(engineName(k.engine))}`}
-        <input type="file" accept=".jpg,.jpeg,.png" multiple hidden></div></div>`;
-  }).join("");
-  document.querySelectorAll("#kindUploads .drop").forEach((zone) => {
-    const kind = zone.dataset.kind;
-    dropZone(zone, zone.querySelector("input"), (files) => {
-      uploads[kind] = (uploads[kind] || []).concat([...files].filter((f) => /\.(jpe?g|png)$/i.test(f.name)));
-      showCounts(); refresh();
-    }, () => kindEngine(kind) === engine()?.id);
-  });
-  showCounts();
+  const own = kinds.filter((k) => k.engine === current?.id);
+  $("#kindTree").textContent = ["frames.zip", ...own.map((k, i) => {
+    const last = i === own.length - 1;
+    return `${last ? "└─" : "├─"} ${k.id}/\n${last ? "   " : "│  "}└─ frame_0001.jpg …`;
+  })].join("\n");
+  $("#kindTree").hidden = !own.length;
 }
-function showCounts() {
-  for (const k of kinds) {
-    const el = document.querySelector(`[data-count="${k.id}"]`);
-    if (!el) continue;
-    const n = (uploads[k.id] || []).length;
-    el.innerHTML = n ? `${plural(n, "image")} · <button type="button" data-clear="${k.id}">Clear</button>` : "no images";
-  }
-  document.querySelectorAll("[data-clear]").forEach((b) => b.addEventListener("click", () => {
-    delete uploads[b.dataset.clear]; showCounts(); refresh();
-  }));
-}
+$("#inputHelpBtn").addEventListener("click", () => $("#inputHelp").showModal());
+$("#codexBtn").addEventListener("click", () => $("#codexDialog").showModal());
+$("#codexClose").addEventListener("click", () => $("#codexDialog").close());
+$("#codexRefresh").addEventListener("click", () => loadCodex(true));
+$("#codexDialog").addEventListener("click", (e) => { if (e.target.id === "codexDialog") $("#codexDialog").close(); });
+$("#inputHelpClose").addEventListener("click", () => $("#inputHelp").close());
+$("#inputHelp").addEventListener("click", (e) => { if (e.target.id === "inputHelp") $("#inputHelp").close(); });
 
 function renderCases() {
   const e = engine();
   document.documentElement.style.setProperty("--engine", e?.color || "#960399");
   const box = $("#cases");
-  if (!e || !e.cases.length) {
-    box.innerHTML = `<div class="none">This engine has no violation cases yet.</div>`;
+  if (!e) {
+    box.innerHTML = `<div class="none">This project may not use any engine yet: give it engines on the <a href="/projects?project=${esc(projectId() || "")}">Projects page</a>.</div>`;
+  } else if (!e.cases.length) {
+    box.innerHTML = `<div class="none">This engine has no output cases yet: add them on the <a href="/engines?engine=${esc(e.id)}">Engines page</a>.</div>`;
   } else {
     const tags = { pending_rule: ["Rule to confirm", "Whether this counts as a violation is still to be confirmed"],
-                   draft: ["Draft", "Our own case; not in the scenario catalogue yet"] };
+                   draft: ["Draft", "Our own case, still being tuned"] };
     box.innerHTML = e.cases.map((c, i) => `
       <label class="case" for="case-${c.id}">
-        <input type="checkbox" id="case-${c.id}" name="case" value="${c.id}" ${i === 0 ? "checked" : ""}>
+        <input type="checkbox" id="case-${c.id}" name="case" value="${c.id}" checked>
         <span><span class="case-title">${esc(c.title)}</span>${tags[c.status] ? `<span class="tag" title="${tags[c.status][1]}">${tags[c.status][0]}</span>` : ""}</span>
-        <span class="case-meta">${c.catalogue !== "-" ? `${esc(c.catalogue)} · ` : ""}from ${c.input_kinds.map((k) => `<code>${esc(k)}</code>`).join(", ")}</span>
-        <span class="case-rate" title="The chance this case is drawn for a frame: 1 every frame, 0.5 about half of them, 0 never">
-          Rate <input type="number" id="rate-${c.id}" data-rate="${c.id}" min="0" max="1" step="0.1" value="1" aria-label="Rate of ${esc(c.title)}"></span>
+        <span class="case-meta">from ${c.input_kinds.map((k) => `<code>${esc(k)}</code>`).join(", ") || "no input kind yet"}</span>
       </label>`).join("");
-    box.querySelectorAll("input").forEach((i) => i.addEventListener(i.dataset.rate ? "input" : "change", refresh));
+    box.querySelectorAll("input").forEach((i) => i.addEventListener("change", refresh));
   }
   renderKinds();
   refresh();
 }
 $("#engine").addEventListener("change", renderCases);
-$("#variants").addEventListener("input", refresh);
-$("#folder").addEventListener("input", refresh);
-// a case's rate: the chance it is drawn per frame, 0-1 (1 when left empty or out of range)
-function rate(id) { const v = parseFloat(($(`#rate-${id}`) || {}).value); return v >= 0 && v <= 1 ? v : 1; }
 function chosen() { return [...document.querySelectorAll("input[name=case]:checked")].map((i) => i.value); }
 
 function formData(dryRun) {
   const data = new FormData();
+  data.append("project_id", projectId());
   data.append("engine", $("#engine").value);
-  chosen().forEach((c) => { data.append("cases", c); data.append(`rate:${c}`, String(rate(c))); });
-  data.append("variants", $("#variants").value);
+  chosen().forEach((c) => data.append("cases", c));
   if (dryRun) data.append("dry_run", "1");
-  if (mode === "upload") {
-    for (const [kind, files] of Object.entries(uploads))
-      if (kindEngine(kind) === engine()?.id) files.forEach((f) => data.append(`files:${kind}`, f, f.name));
-  } else if (mode === "zip") data.append("zip", zipFile, zipFile.name);
-  else data.append("folder", $("#folder").value.trim());
+  data.append("zip", zipFile, zipFile.name);
   return data;
 }
 
+// what one output costs, from the runs Codex counted in full (older logs held only part of the input)
+function tokenNote(t) {
+  const parts = [`${kTok(t.median)} input`];
+  if (t.cached_median !== null) parts[0] += ` (≈${kTok(t.cached_median)} of it cached)`;
+  if (t.output_median !== null) parts.push(`${kTok(t.output_median)} output`);
+  return `About ${parts.join(" and ")} tokens per output, the median of ${plural(t.samples, "run")} with full Codex counts`
+    + `${t.basis === "first measurements" ? " (too few yet: an early estimate)" : ""}. Image generation is not included.`;
+}
 function planRows(frames, outputs, tokens, extra = "") {
   const rows = [];
   if (frames !== null) rows.push(["Frames used", fmt(frames)]);
   rows.push(["Outputs (Astra edits)", outputs === null ? "–" : fmt(outputs)]);
   if (tokens) rows.push(["Estimated input tokens", `~${kTok(tokens.median)} (${kTok(tokens.low)}–${kTok(tokens.high)})`]);
   $("#plan").innerHTML = rows.map(([a, b]) => `<div class="plan-row"><span>${a}</span><strong>${b}</strong></div>`).join("")
-    + `<div class="hint">${perOutput ? `About ${kTok(perOutput.median)} input tokens per output (${perOutput.samples} ${perOutput.basis}); Codex input usage, including legacy input-only readings. Imagegen usage is not included.` : ""}${extra}</div>`;
+    + `<div class="hint">${perOutput ? tokenNote(perOutput) : ""}${extra}</div>`;
 }
 
 function refresh() {
-  const e = engine(), cases = chosen(), variants = Math.min(10, Math.max(1, +$("#variants").value || 1));
-  let inputReady, outputs = null;
-  if (mode === "upload") {
-    let frames = 0;
+  const e = engine(), cases = chosen();
+  const inputReady = !!zipFile && !uploading;
+  let outputs = null;
+  plannedOutputs = null;
+  showFit(null);
+  clearTimeout(checkTimer);
+  if (!zipFile) planRows(null, null, null, " Choose a zip to see how many outputs it makes.");
+  else if (zipCounts === null) planRows(null, null, null, " Reading the zip…");
+  else if (zipCounts === "unreadable") {            // let the service read it (uploads the zip)
+    planRows(null, null, null, " Checking the zip on the service…");
+    if (e && cases.length) checkTimer = setTimeout(checkInput, 500);
+  } else if (e) {
+    let frames = 0, notes = [];
     outputs = 0;
-    for (const [kind, files] of Object.entries(uploads)) {
-      if (!e || kindEngine(kind) !== e.id) continue;
-      const rates = e.cases.filter((c) => cases.includes(c.id) && c.input_kinds.includes(kind)).map((c) => rate(c.id));
-      frames += files.length; outputs += files.length * expectedPerFrame(rates, variants);
+    for (const [folder, n] of Object.entries(zipCounts)) {
+      if (folder === "") continue;
+      if (!e.input_kinds.includes(folder)) { notes.push(`${plural(n, "image")} in ${folder}/ left out`); continue; }
+      frames += n;
+      outputs += n * e.cases.filter((c) => cases.includes(c.id) && c.input_kinds.includes(folder)).length;
     }
-    inputReady = frames > 0;
-    outputs = Math.round(outputs);          // an expected count when a rate is below 1; the job's own draw decides
-    planRows(frames, outputs, outputs && perOutput ? { median: outputs * perOutput.median, low: outputs * perOutput.low, high: outputs * perOutput.high } : null,
-             frames ? "" : " Add images to a kind this engine uses.");
+    const hint = frames ? "" : !zipCounts[""]
+      ? " This zip holds no images (.jpg / .png): put the input frames in it, in folders named by input kind (see ? above)."
+      : ` None of its ${plural(zipCounts[""], "image")} is in a folder this engine takes (${e.input_kinds.join(", ")}): name the folders by input kind (see ? above).`;
+    planRows(frames, outputs, outputs && perOutput ? { median: outputs * perOutput.median, low: outputs * perOutput.low,
+             high: outputs * perOutput.high } : null, hint + (notes.length ? ` ${esc(notes.join(" · "))}.` : ""));
     plannedOutputs = outputs || null;
     showFit(outputs ? fitFor(outputs) : null);
-  } else {
-    inputReady = mode === "zip" ? !!zipFile : !!$("#folder").value.trim();
-    planRows(null, null, null, inputReady ? " Checking the input…" : " Give a folder or a zip to see how many outputs it makes.");
-    plannedOutputs = null;
-    showFit(null);
-    clearTimeout(checkTimer);
-    if (inputReady && e && cases.length) checkTimer = setTimeout(checkInput, 500);
   }
-  const ready = !!e && cases.length > 0 && inputReady && outputs !== 0;
+  const ready = !!e && cases.length > 0 && inputReady && outputs !== 0 && (outputs !== null || zipCounts === "unreadable");
   $("#go").textContent = outputs ? `Generate ${plural(outputs, "output")}` : "Generate";
   $("#go").disabled = !ready || !!(fit && !fit.fits);
   $("#stepInput").classList.toggle("ready", inputReady);
-  $("#stepEngine").classList.toggle("ready", cases.length > 0);
-  $("#stepGo").classList.toggle("ready", ready);
+  $("#stepEngine").classList.toggle("ready", ready);
 }
 
-// counts the frames and outputs of a folder or zip on the server without starting anything
+// counts the frames and outputs of the zip on the server without starting anything
 async function checkInput() {
   const seq = ++checkSeq;
   try {
@@ -805,14 +855,35 @@ async function checkInput() {
 
 function detail(body) { const d = body && body.detail; return d && typeof d === "object" ? d.message : d; }
 $("#form").addEventListener("submit", (ev) => { ev.preventDefault(); submitJob(false); });
+// a POST whose upload progress is reported (0-1); resolves {status, ok, body} like a parsed fetch
+function postWithProgress(url, data, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) onProgress(ev.loaded / ev.total); };
+    xhr.upload.onload = () => onProgress(1);
+    xhr.onload = () => {
+      let body = {};
+      try { body = JSON.parse(xhr.responseText); } catch (_) {}
+      resolve({ status: xhr.status, ok: xhr.status >= 200 && xhr.status < 300, body });
+    };
+    xhr.onerror = () => reject(new Error("The upload stopped: the service did not answer."));
+    xhr.send(data);
+  });
+}
+window.addEventListener("beforeunload", (ev) => { if (uploading) ev.preventDefault(); });
+
 async function submitJob(force) {
   const problem = $("#problem"); problem.hidden = true;
   const go = $("#go"); go.disabled = true; go.textContent = "Starting…";
   try {
     const data = formData(false);
     if (force) data.append("force", "1");
-    const res = await fetch("/api/jobs", { method: "POST", body: data });
-    const body = await res.json().catch(() => ({}));
+    uploading = true;
+    const res = await postWithProgress("/api/jobs", data, (part) => {
+      go.textContent = part < 1 ? `Uploading the zip… ${Math.round(part * 100)}%` : "Unpacking and starting…";
+    });
+    const body = res.body;
     if (res.status === 409 && body.detail && body.detail.codex) {
       codex = body.detail.codex.status; renderCodex();
       showFit({ fits: false, reason: body.detail.message });
@@ -825,6 +896,7 @@ async function submitJob(force) {
   } catch (err) {
     problem.textContent = String(err.message || err); problem.hidden = false;
   } finally {
+    uploading = false;
     const kept = fit && !fit.fits ? fit : null;
     if (kept) { showFit(kept); $("#go").textContent = "Generate"; } else refresh();
   }
@@ -833,13 +905,7 @@ async function submitJob(force) {
 // ---------- history ----------
 async function loadHistory() {
   try {
-    const list = await (await fetch("/api/jobs")).json();
-    const pick = $("#jobPick");
-    pick.innerHTML = `<option value="">New job…</option>` + list.map((j) => {
-      const state = j.finished ? `${fmt(j.counts.done)}/${fmt(j.total)} done` : `running ${fmt(j.counts.done + j.counts.failed)}/${fmt(j.total)}`;
-      return `<option value="${esc(j.id)}">${esc(j.id)} · ${esc(j.engine_name)} · ${state}</option>`;
-    }).join("");
-    pick.value = job ? job.id : "";
+    const list = await (await fetch(`/api/jobs?project_id=${encodeURIComponent(projectId())}`)).json();
     $("#history").innerHTML = list.length ? list.slice(0, 20).map((j) => {
       const when = new Date(j.created * 1000).toLocaleString();
       const state = j.finished ? `${fmt(j.counts.done)}/${fmt(j.total)} done` : `${fmt(j.counts.done + j.counts.failed)}/${fmt(j.total)} made`;
@@ -869,7 +935,6 @@ function closeJob() {
   $("#start").hidden = false; $("#summary").hidden = true; $("#pairs").hidden = true;
   loadHistory();
 }
-$("#jobPick").addEventListener("change", (e) => openJobById(e.target.value));
 window.addEventListener("hashchange", () => {
   const m = location.hash.match(/job=([\w-]+)/);
   openJobById(m ? m[1] : "");
@@ -880,7 +945,6 @@ function openJob(state) {
   if (!job || job.id !== state.id) picked = new Set();
   job = state; filter = "all"; caseFilter = "all";
   try { if (location.hash !== `#job=${job.id}`) history.pushState(null, "", `#job=${job.id}`); } catch (_) {}
-  const pick = $("#jobPick"); if (pick) pick.value = job.id;
   $("#start").hidden = true; $("#summary").hidden = false; $("#pairs").hidden = false;
   renderJob(); connect();
 }
@@ -978,7 +1042,7 @@ function renderSummary() {
   if (e) document.documentElement.style.setProperty("--engine", e.color);
   $("#jobTitle").textContent = job.finished ? `${fmt(c.done)} of ${fmt(total)} outputs ready` : `${fmt(c.done + c.failed)} of ${fmt(total)} outputs made`;
   const when = job.created ? new Date(job.created * 1000).toLocaleString() : "";
-  $("#jobMeta").textContent = `${job.engine_name} · ${plural(job.inputs.length, "input frame")} · job ${job.id}${when ? ` · ${when}` : ""}`;
+  $("#jobMeta").textContent = `${projectName(job.project_id)} · ${job.engine_name} · ${plural(job.inputs.length, "input frame")} · job ${job.id}${when ? ` · ${when}` : ""}`;
   if (job.finished) live("Finished", "");
   const pct = (n) => `${(100 * n / Math.max(total, 1)).toFixed(2)}%`;
   document.querySelector(".m-done").style.width = pct(c.done);
@@ -1247,7 +1311,7 @@ function openRebuild(el, t) {
   if (el.querySelector(".rebuild-form")) return;
   const form = document.createElement("form");
   form.className = "rebuild-form";
-  form.innerHTML = `<label class="field" for="note-${t.id}" style="margin:0">What should change in this image?</label>
+  form.innerHTML = `<label class="field" for="note-${t.id}" style="margin:0">What is wrong in this image? It goes back to Astra with your feedback.</label>
     <textarea id="note-${t.id}" maxlength="1000" placeholder="e.g. make both loads wider, as wide as the forklift, and close the gap between them"></textarea>
     <div class="err" hidden></div>
     <div class="row"><button type="button" class="btn-quiet" data-cancel>Cancel</button>
@@ -1363,16 +1427,46 @@ function view(url, caption, name) {
 $("#viewerClose").addEventListener("click", () => $("#viewer").close());
 $("#viewer").addEventListener("click", (e) => { if (e.target.id === "viewer") $("#viewer").close(); });
 
+// ---------- projects ----------
+let projects = [];
+function projectId() { return $("#projectPick").value; }
+function projectName(id) { return (projects.find((p) => p.id === id) || {}).name || "no project"; }
+// the engines, kinds and cases the chosen project may use
+async function loadEngines() {
+  const data = await (await fetch(`/api/engines?project_id=${encodeURIComponent(projectId())}`)).json();
+  kinds = data.input_kinds; engines = data.engines; perOutput = data.tokens_per_output;
+  const keep = $("#engine").value;
+  $("#engine").innerHTML = engines.map((e) => `<option value="${esc(e.id)}">${esc(e.name)}</option>`).join("");
+  if (engines.some((e) => e.id === keep)) $("#engine").value = keep;
+  $("#engine").disabled = !engines.length;
+  renderCases();
+}
+$("#projectPick").addEventListener("change", async () => {
+  const url = new URL(location.href); url.searchParams.set("project", projectId());
+  try { history.replaceState(null, "", url); localStorage.setItem("sdg-project", projectId()); } catch (_) {}
+  if (job && job.project_id !== +projectId()) closeJob();
+  await loadEngines();
+  loadHistory();
+});
+
 (async () => {
   try {
-    const data = await (await fetch("/api/engines")).json();
-    kinds = data.input_kinds; engines = data.engines; perOutput = data.tokens_per_output;
+    projects = await (await fetch("/api/projects")).json();
+    if (!Array.isArray(projects)) throw new Error("no projects");
+    if (!projects.length) {
+      $("#problem").innerHTML = `There is no project yet: <a href="/projects">create one</a> first.`; $("#problem").hidden = false;
+      return;
+    }
+    let saved = null;
+    try { saved = localStorage.getItem("sdg-project"); } catch (_) {}
+    const wanted = new URLSearchParams(location.search).get("project") || saved;
+    $("#projectPick").innerHTML = projects.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
+    if (projects.some((p) => String(p.id) === wanted)) $("#projectPick").value = wanted;
+    await loadEngines();
   } catch (err) {
-    $("#problem").textContent = "The service did not answer. Start it, then reload this page."; $("#problem").hidden = false;
+    $("#problem").textContent = "The service did not answer (or its database is not reachable). Start it, then reload this page."; $("#problem").hidden = false;
     return;
   }
-  $("#engine").innerHTML = engines.map((e) => `<option value="${e.id}">${esc(e.name)}</option>`).join("");
-  renderCases();
   loadHistory();
   loadCodex();
   setInterval(() => loadCodex(), 60000);
@@ -1383,5 +1477,6 @@ $("#viewer").addEventListener("click", (e) => { if (e.target.id === "viewer") $(
   }
 })();
 </script>
+<script src="/static/nav.js"></script>
 </body>
 </html>
