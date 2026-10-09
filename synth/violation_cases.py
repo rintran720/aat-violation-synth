@@ -284,9 +284,9 @@ LID_POSES = [      # the real hatch (user's clips, 2026-10-09): lifted on its hi
     (20, 35, "propped up only slightly: one edge still resting in the frame and the opposite edge lifted about "
              "{angle} degrees from the floor, so only a low wedge-shaped gap of the opening shows between them"),
     (40, 60, "leaning half open, tilted about {angle} degrees from the floor: one edge resting on the frame's edge and "
-             "the plate slanting over the opening, its rusty brown-yellow underside partly visible"),
+             "the plate slanting over the opening, its stained, rusty brown underside partly visible"),
     (75, 90, "standing on one edge beside the opening at about {angle} degrees from the floor, its far edge still "
-             "on the hinge, its rusty brown-yellow underside facing the camera and the whole opening uncovered"),
+             "on the hinge, its stained, rusty brown underside facing the camera and the whole opening uncovered"),
     (0, 0, "lifted right out of the frame and laid flat on the floor right next to the opening, alongside one of its "
            "edges and not overlapping it, its studded top face up and the whole opening uncovered"),
 ]
