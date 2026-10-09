@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Jobs · Synthetic Data Generation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/static/base.css">
+<style>
+  .bar-row { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin-bottom: 14px; }
+  .bar-row label.field { margin-top: 0; }
+  .bar-row select { width: auto; min-width: 180px; }
+  .bar-row .live { margin-left: auto; color: var(--ink-soft); font-size: var(--step-0); }
+  .jobs { display: grid; gap: 10px; }
+  .job { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.6fr) auto; gap: 8px 18px; align-items: center;
+         background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 12px 16px;
+         border-left: 4px solid var(--dot, var(--rule)); }
+  .job.running { box-shadow: 0 0 0 1px color-mix(in oklab, var(--engine) 40%, transparent); }
+  @media (max-width: 900px) { .job { grid-template-columns: minmax(0, 1fr); } }
+  .job .id { font: 600 var(--step-1) var(--font-mono); color: var(--ink); text-decoration: none; }
+  .job .id:hover { text-decoration: underline; }
+  .job .meta { color: var(--ink-soft); font-size: var(--step-0); margin-top: 2px; }
+  .job .meta b { color: var(--ink); font-weight: 600; }
+  .progress { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: var(--sunken); }
+  .progress span { display: block; height: 100%; }
+  .p-done { background: var(--ok); } .p-failed { background: var(--bad); } .p-interrupted { background: var(--warn); }
+  .p-running { background: var(--engine); animation: pulse 1.4s ease-in-out infinite; } .p-queued { background: color-mix(in oklab, var(--ink-soft) 45%, transparent); }
+  @keyframes pulse { 50% { opacity: .55; } }
+  @media (prefers-reduced-motion: reduce) { .p-running { animation: none; } }
+  .counts { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; font-size: var(--step-0); color: var(--ink-soft);
+            font-variant-numeric: tabular-nums; }
+  .counts b { color: var(--ink); font-weight: 600; }
+  .counts .c-failed b { color: var(--bad); } .counts .c-interrupted b { color: var(--warn); } .counts .c-good b { color: var(--ok); }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .tag.hidden-tag { background: var(--sunken); }
+  dialog.sheet form { padding: 16px; display: grid; gap: 10px; }
+  dialog.sheet .row-end { display: flex; gap: 8px; justify-content: flex-end; }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>Synthetic Data Generation</h1><span class="crumb">Jobs</span>
+    <p>Every job and how far it has got, updated live. Cancel stops the outputs still waiting; Resume runs the ones that
+      were interrupted; Retry failed runs the failed ones again; Re-generate makes a new job from the same input frames
+      and cases with the prompts as they are now, to compare.</p>
+  </header>
+
+  <div class="bar-row">
+    <div><label class="field" for="project">Project</label><select id="project"><option value="">All projects</option></select></div>
+    <div><label class="field" for="state">Status</label>
+      <select id="state"><option value="">All</option><option value="running">Running or waiting</option>
+        <option value="finished">Finished</option><option value="attention">With failed or interrupted outputs</option></select></div>
+    <span class="live" id="live" aria-live="polite"></span>
+  </div>
+  <div class="jobs" id="jobs"><div class="empty">Loading…</div></div>
+</main>
+
+<dialog class="sheet" id="regen" aria-labelledby="regenTitle">
+  <header><strong id="regenTitle">Re-generate</strong><button class="btn" type="button" id="regenClose">Close</button></header>
+  <form id="regenForm">
+    <div class="help" id="regenWhat"></div>
+    <div><label class="field" for="regenProject">Into project</label><select id="regenProject"></select></div>
+    <div class="help">The prompts and object references as they are now are used; the old job stays as it is.</div>
+    <div class="row-end"><button class="btn primary" type="submit">Re-generate</button></div>
+  </form>
+</dialog>
+<script src="/static/ui.js"></script>
+<script src="/static/nav.js"></script>
+<script>
+let projects = [], engines = {}, list = [], timer = null, regenJob = null;
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+const kTok = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n || 0);
+const project = (id) => projects.find((p) => p.id === id);
+
+async function postForm(url, fields = {}) {
+  const form = new FormData(); Object.entries(fields).forEach(([k, v]) => form.append(k, v));
+  const res = await fetch(url, { method: "POST", body: form });
+  const body = await res.json().catch(() => ({}));
+  return { res, body };
+}
+function message(body, status) {
+  const d = body && body.detail;
+  return typeof d === "string" ? d : d && d.message ? d.message : `The service answered ${status}.`;
+}
+
+function row(j) {
+  const c = j.counts, total = j.total || 1, p = project(j.project_id);
+  const seg = (k) => c[k] ? `<span class="p-${k}" style="width:${100 * c[k] / total}%" title="${plural(c[k], k)}"></span>` : "";
+  const busy = c.queued + c.running;
+  const color = engines[j.engine]?.color || "var(--rule)";
+  const when = new Date(j.created * 1000).toLocaleString();
+  const acts = [
+    `<a class="btn" href="/?project=${p && !p.hidden ? p.id : ""}#job=${encodeURIComponent(j.id)}">Open</a>`,
+    c.queued ? `<button class="btn" data-act="cancel">Cancel ${c.queued}</button>` : "",
+    c.interrupted ? `<button class="btn" data-act="resume">Resume ${c.interrupted}</button>` : "",
+    c.failed && !busy ? `<button class="btn" data-act="retry">Retry ${c.failed} failed</button>` : "",
+    `<button class="btn primary" data-act="regen">Re-generate</button>`,
+  ].join("");
+  return `<article class="job ${busy ? "running" : ""}" data-id="${esc(j.id)}" style="--dot:${esc(color)}">
+    <div><a class="id" href="/?project=${p && !p.hidden ? p.id : ""}#job=${encodeURIComponent(j.id)}">${esc(j.id)}</a>
+      <div class="meta"><b>${esc(p ? p.name : "project " + j.project_id)}</b>${p && p.hidden ? ` <span class="tag hidden-tag">hidden</span>` : ""}
+        · ${esc(j.engine_name)} · ${plural(j.inputs, "frame")} · ${esc(when)}</div>
+      ${j.notes && j.notes.length ? `<div class="meta">${esc(j.notes.join(" · "))}</div>` : ""}</div>
+    <div><div class="progress" role="img" aria-label="${c.done} of ${j.total} done">${["done", "failed", "interrupted", "running", "queued"].map(seg).join("")}</div>
+      <div class="counts"><span><b>${c.done}</b>/${j.total} done</span>
+        ${c.running ? `<span><b>${c.running}</b> running</span>` : ""}${c.queued ? `<span><b>${c.queued}</b> waiting</span>` : ""}
+        ${c.failed ? `<span class="c-failed"><b>${c.failed}</b> failed</span>` : ""}${c.interrupted ? `<span class="c-interrupted"><b>${c.interrupted}</b> interrupted</span>` : ""}
+        ${j.review && (j.review.good || j.review.bad) ? `<span class="c-good"><b>${j.review.good}</b> good / ${j.review.bad} bad</span>` : ""}
+        <span>${kTok(j.tokens_used)} tokens</span></div></div>
+    <div class="actions">${acts}</div></article>`;
+}
+
+function render() {
+  const pid = $("#project").value, state = $("#state").value;
+  const shown = list.filter((j) => (!pid || j.project_id === +pid) && (
+    !state || (state === "running" && !j.finished) || (state === "finished" && j.finished)
+    || (state === "attention" && (j.counts.failed || j.counts.interrupted))));
+  $("#jobs").innerHTML = shown.map(row).join("") || `<div class="empty">No jobs here.</div>`;
+  const running = list.filter((j) => !j.finished).length;
+  $("#live").textContent = running ? `${plural(running, "job")} running · updates every 5 s` : `All jobs finished · ${new Date().toLocaleTimeString()}`;
+  $$("#jobs [data-act]").forEach((b) => b.addEventListener("click", () => act(b.closest(".job").dataset.id, b.dataset.act)));
+}
+
+async function load() {
+  try { list = await api("GET", "/api/jobs"); } catch (err) { toast(err.message, true); }
+  render();
+  clearTimeout(timer);
+  timer = setTimeout(load, list.some((j) => !j.finished) ? 5000 : 30000);
+}
+
+async function act(id, what) {
+  const j = list.find((x) => x.id === id);
+  if (what === "regen") return openRegen(j);
+  const label = { cancel: `Cancel the ${j.counts.queued} waiting outputs of ${id}? Running ones finish; Resume runs the cancelled ones later.`,
+                  resume: `Run the ${j.counts.interrupted} interrupted outputs of ${id} again?`,
+                  retry: `Run the ${j.counts.failed} failed outputs of ${id} again?` }[what];
+  if (!confirm(label)) return;
+  const url = what === "cancel" ? `/api/jobs/${id}/cancel` : `/api/jobs/${id}/resume`;
+  const fields = what === "retry" ? { failed: "1" } : {};
+  let { res, body } = await postForm(url, fields);
+  if (res.status === 409 && body.detail && body.detail.codex && confirm(`${message(body, 409)}\n\nRun anyway?`)) {
+    ({ res, body } = await postForm(url, { ...fields, force: "1" }));
+  }
+  if (!res.ok) toast(message(body, res.status), true);
+  else toast(what === "cancel" ? `Cancelled ${body.cancelled}` : `Queued ${body.resumed} again`);
+  load();
+}
+
+function openRegen(j) {
+  regenJob = j;
+  const ok = projects.filter((p) => !p.hidden && p.engines.includes(j.engine));
+  $("#regenWhat").textContent = `${j.id}: ${j.engine_name}, ${plural(j.inputs, "input frame")}, ${plural(j.cases.length, "case")}.`;
+  $("#regenProject").innerHTML = ok.map((p) => `<option value="${p.id}" ${p.id === j.project_id ? "selected" : ""}>${esc(p.name)}</option>`).join("")
+    || `<option value="">No shown project may use ${esc(j.engine_name)}</option>`;
+  $("#regen").showModal();
+}
+$("#regenClose").addEventListener("click", () => $("#regen").close());
+$("#regenForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!$("#regenProject").value) return;
+  const url = `/api/jobs/${regenJob.id}/regenerate`, fields = { project_id: $("#regenProject").value };
+  let { res, body } = await postForm(url, fields);
+  if (res.status === 409 && body.detail && body.detail.codex && confirm(`${message(body, 409)}\n\nRun anyway?`)) {
+    ({ res, body } = await postForm(url, { ...fields, force: "1" }));
+  }
+  if (!res.ok) { toast(message(body, res.status), true); return; }
+  $("#regen").close(); toast(`New job ${body.id}: ${plural(body.total, "output")}`); load();
+});
+$("#project").addEventListener("change", () => { setParam("project", $("#project").value); render(); });
+$("#state").addEventListener("change", render);
+
+Promise.all([api("GET", "/api/projects?all=1"), api("GET", "/api/catalogue")]).then(([ps, cat]) => {
+  projects = ps; engines = cat.engines;
+  $("#project").innerHTML += projects.map((p) => `<option value="${p.id}">${esc(p.name)}${p.hidden ? " (hidden)" : ""}</option>`).join("");
+  if (param("project")) $("#project").value = param("project");
+  load();
+}).catch((err) => toast(err.message, true));
+</script>
+</body>
+</html>

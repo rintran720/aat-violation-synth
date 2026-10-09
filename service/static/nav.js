@@ -2,6 +2,7 @@
 (() => {
   const PAGES = [
     { href: "/", label: "Generate", note: "Run jobs, review and download outputs" },
+    { href: "/jobs", label: "Jobs", note: "Progress of every job: cancel, resume, re-generate" },
     { href: "/projects", label: "Projects", note: "Projects and the engines each may use" },
     { href: "/engines", label: "Engines", note: "Engines, their input kinds and outputs" },
     { href: "/prompts", label: "Prompts", note: "The prompt text of every engine, kind and case" },

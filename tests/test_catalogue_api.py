@@ -344,8 +344,33 @@ class CatalogueApiTests(unittest.TestCase):
         self.assertIn("LSP has no image", final["tasks"][0]["error"])
         self.assertEqual(self.calls, [])
 
+    def test_regenerate_makes_a_new_job_of_the_same_frames_and_cases_with_the_prompts_of_now(self) -> None:
+        first = self.job(1).json()
+        self.wait_finished(first["id"])
+        self.client.post(f"/api/jobs/{first['id']}/inputs/forklift-with-lsp-cargo/b.jpg/exclude", data={"excluded": "1"})
+        self.client.put(f"/api/engines/{PUSH}/cases/push_2_lsp_cargo/prompts/forklift-with-lsp-cargo",
+                        json={"change": "the prompt of now."})
+        answer = self.client.post(f"/api/jobs/{first['id']}/regenerate")
+        self.assertEqual(answer.status_code, 200, answer.text)
+        again = answer.json()
+        self.assertNotEqual(again["id"], first["id"])
+        self.assertEqual((again["project_id"], again["engine"], again["cases"]), (1, PUSH, ["push_2_lsp_cargo"]))
+        self.assertEqual([i["name"] for i in again["inputs"]], ["a.jpg"])          # the excluded frame is left out
+        self.assertIn(f"re-generated from job {first['id']}", again["notes"])
+        self.wait_finished(again["id"])
+        self.assertEqual(self.calls[-1]["change"], "the prompt of now.")
+        self.assertEqual(self.client.get(f"/api/jobs/{first['id']}").json()["total"], 2)   # the old job is untouched
+        summary = next(j for j in self.client.get("/api/jobs").json() if j["id"] == again["id"])
+        self.assertEqual(summary["review"]["outputs"], 1)
+        self.client.patch("/api/projects/1", json={"hidden": True})
+        self.assertEqual(self.client.post(f"/api/jobs/{first['id']}/regenerate").status_code, 403)
+        shown = self.client.post("/api/projects", json={"name": "Shown", "engines": [PUSH]}).json()
+        into = self.client.post(f"/api/jobs/{first['id']}/regenerate", data={"project_id": str(shown["id"])})
+        self.assertEqual(into.json()["project_id"], shown["id"])
+        self.wait_finished(into.json()["id"])
+
     def test_the_pages_and_their_menu_are_served(self) -> None:
-        for page in ("/", "/projects", "/engines", "/prompts", "/references"):
+        for page in ("/", "/jobs", "/projects", "/engines", "/prompts", "/references"):
             with self.subTest(page=page):
                 response = self.client.get(page)
                 self.assertEqual(response.status_code, 200)

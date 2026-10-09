@@ -63,8 +63,8 @@ from synth.try_astra_edit_batch import IMAGE_TYPES, ROOT, edit_frame, frames, re
 JOBS_DIR = ROOT / "work/service/jobs"
 STATIC = Path(__file__).resolve().parent / "static"
 WORKERS = 3
-PAGES = {"": "index.html", "projects": "projects.html", "engines": "engines.html", "prompts": "prompts.html",
-         "references": "references.html"}
+PAGES = {"": "index.html", "jobs": "jobs.html", "projects": "projects.html", "engines": "engines.html",
+         "prompts": "prompts.html", "references": "references.html"}
 MAX_TASKS = 500
 # the Codex usage limit only warns (user, 2026-10-09: do not block generating when the quota is used up); with
 # ENFORCE_CODEX_LIMIT=1 in the environment a job, resume or rebuild over it is refused (409) unless forced
@@ -230,7 +230,7 @@ class Job:
     def summary(self) -> dict:
         state = self.public()
         return {key: state[key] for key in ("id", "created", "engine", "engine_name", "cases", "project_id",
-                                            "total", "counts", "finished")} | {"inputs": len(state["inputs"]),
+                                            "total", "counts", "finished", "review", "notes")} | {"inputs": len(state["inputs"]),
                                                             "tokens_used": state["tokens"]["used"],
                                                             "token_usage": state["tokens"]}
 
@@ -663,7 +663,7 @@ async def create_job(request: Request) -> dict:
     if sum((bool(folder), archive is not None, bool(uploads))) != 1:
         raise HTTPException(400, "give the input one way: a folder path, a zip, or images uploaded per input kind")
 
-    job_folder = JOBS_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    job_folder = new_job_folder()
     scratch = job_folder if not dry_run else JOBS_DIR / f".dry-{uuid.uuid4().hex[:8]}"
     notes: list[str] = []
     try:
@@ -718,6 +718,16 @@ async def create_job(request: Request) -> dict:
         if dry_run:
             shutil.rmtree(scratch, ignore_errors=True)
 
+    return (await start_job(job_folder, engine, cases, inputs, notes, project_id)).public()
+
+
+def new_job_folder() -> Path:
+    return JOBS_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+
+
+async def start_job(job_folder: Path, engine: str, cases: list[str], inputs: dict[str, list[Path]], notes: list[str],
+                    project_id: int) -> "Job":
+    """Keep the inputs in the job's folder, record the job (database and job.json) and queue its tasks."""
     job_folder.mkdir(parents=True, exist_ok=True)
     job = Job(job_folder, engine, cases, keep_inputs(inputs, job_folder), notes, project_id)
     job.loop = asyncio.get_running_loop()
@@ -730,7 +740,39 @@ async def create_job(request: Request) -> dict:
     jobs[job.id] = job
     for task in job.tasks:
         submit(job, task)
-    return job.public()
+    return job
+
+
+@app.post("/api/jobs/{job_id}/regenerate")
+async def regenerate(job_id: str, request: Request) -> dict:
+    """A new job from the same input frames (those not excluded) and cases as this one, made with the prompts and
+    references as they are now: to compare outputs after a prompt change. Form fields: project_id (default: the job's
+    own; a hidden project takes no new job), force (to run past the Codex usage limit). The old job is not touched."""
+    source = get_job(job_id)
+    form = await request.form()
+    project_id = int(str(form.get("project_id") or source.project_id or 0))
+    if db.current().project(project_id)["hidden"]:
+        raise HTTPException(403, f"project {project_id} is hidden: choose a shown project to re-generate into")
+    if source.engine not in project_engines(project_id):
+        raise HTTPException(403, f"project {project_id} may not use engine {source.engine!r}")
+    engine_cases = catalog()["engines"].get(source.engine, {}).get("cases", {})
+    cases = [c for c in source.cases if c in engine_cases]
+    gone = [c for c in source.cases if c not in engine_cases]
+    with source.lock:
+        inputs = {kind: [image for image in images if f"{kind}/{image.name}" not in source.excluded]
+                  for kind, images in source.inputs.items()}
+    inputs = {kind: images for kind, images in inputs.items() if images}
+    notes = [f"re-generated from job {source.id}"] + ([f"cases no longer in the engine: {', '.join(gone)}"] if gone else [])
+    job_folder = new_job_folder()
+    planned = Job(job_folder, source.engine, cases, inputs, notes, project_id)
+    if not cases or not planned.tasks:
+        raise HTTPException(400, "nothing to re-generate: none of the job's cases takes its input frames any more")
+    if len(planned.tasks) > MAX_TASKS:
+        raise HTTPException(400, f"{len(planned.tasks)} outputs is over {MAX_TASKS}")
+    fit = await codex_fit(len(planned.tasks))
+    if not fit["fits"] and str(form.get("force", "")) not in ("1", "true"):
+        raise HTTPException(409, {"message": fit["reason"], "codex": fit})
+    return (await start_job(job_folder, source.engine, cases, inputs, notes, project_id)).public()
 
 
 MAX_NOTE = 1000

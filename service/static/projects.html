@@ -14,6 +14,9 @@
   .stats strong { color: var(--ink); font-variant-numeric: tabular-nums; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
   .actions .spacer { flex: 1; }
+  .switch { display: flex; align-items: center; gap: 10px; margin-top: 16px; cursor: pointer; }
+  .switch input { width: 18px; height: 18px; accent-color: var(--engine); margin: 0; }
+  .switch b { font-weight: 600; }
 </style>
 </head>
 <body>
@@ -52,6 +55,10 @@
         </div>
         <label class="field" for="desc">Description</label>
         <textarea id="desc" maxlength="2000" style="min-height:60px;font-family:var(--font-body)"></textarea>
+        <label class="switch" for="shown"><input type="checkbox" id="shown">
+          <span><b>Shown</b> on the Generate page and taking new jobs</span></label>
+        <div class="help" style="margin-top:2px">A hidden project keeps its jobs (see them on the Jobs page) but is left
+          out of the Generate page and takes no new job.</div>
         <h3>Engines this project may use</h3>
         <p class="help" style="margin-top:0">A job of this project can only run an engine ticked here. New engines are
           added on the Engines page.</p>
@@ -83,7 +90,7 @@ function renderList() {
     <button type="button" data-id="${p.id}" aria-current="${current === p.id}">
       <span class="dot" style="--dot:var(--ink-soft)"></span><span class="name">${esc(p.name)}</span>
       <span class="count">${p.jobs} job${p.jobs === 1 ? "" : "s"}</span>
-      <span class="meta">${p.engines.length ? p.engines.map((e) => esc(engines[e]?.name || e)).join(" · ") : "no engines"}</span>
+      <span class="meta">${p.hidden ? `<span class="tag">hidden</span> ` : ""}${p.engines.length ? p.engines.map((e) => esc(engines[e]?.name || e)).join(" · ") : "no engines"}</span>
     </button>`).join("") || `<div class="empty">No projects yet.</div>`;
   $$("#list button").forEach((b) => b.addEventListener("click", () => select(+b.dataset.id)));
 }
@@ -103,11 +110,12 @@ function select(id) {
   engineChecks($("#grants"), p.engines, "grant");
   $("#openGenerate").href = `/?project=${p.id}`;
   $("#delete").disabled = p.jobs > 0;
+  $("#shown").checked = !p.hidden;
   $("#delete").title = p.jobs ? "Only a project with no jobs can be deleted" : "";
 }
 
 async function load(selectId) {
-  const [list, catalogue] = await Promise.all([api("GET", "/api/projects"), api("GET", "/api/catalogue")]);
+  const [list, catalogue] = await Promise.all([api("GET", "/api/projects?all=1"), api("GET", "/api/catalogue")]);
   projects = list; engines = catalogue.engines;
   engineChecks($("#newEngines"), [], "newEngine");
   const wanted = selectId ?? (+param("project") || projects[0]?.id);
@@ -123,7 +131,7 @@ $("#newForm").addEventListener("submit", async (e) => {
 $("#edit").addEventListener("submit", async (e) => {
   e.preventDefault();
   const saved = await act(api("PATCH", `/api/projects/${current}`, { name: $("#name").value,
-    description: $("#desc").value, engines: ticked("grant") }), "Saved");
+    description: $("#desc").value, engines: ticked("grant"), hidden: !$("#shown").checked }), "Saved");
   if (saved) await load(saved.id);
 });
 $("#delete").addEventListener("click", async () => {
