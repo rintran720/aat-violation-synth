@@ -280,19 +280,15 @@ OPEN_HATCH = ("the floor hatch, closed in image 1, is now OPEN: its cover is lif
               "larger or smaller, and the metal frame around it stays where it was. The raised cover is as big as the "
               "hole it came from and stays attached to the frame at its hinge edge. ")
 # (lowest angle, highest angle, how the cover looks); the angle is between the cover and the floor
-LID_POSES = [
-    (20, 35, "only slightly open, tilted up about {angle} degrees from the floor: its free edge, the one nearest the "
-             "camera, is lifted just a little above the floor, so the cover still hides most of the hole and the dark "
-             "pit shows only as a low wedge-shaped gap between its lifted edge and the frame"),
-    (40, 60, "half open, tilted up about {angle} degrees from the floor: it leans out over the hole at a slant, its "
-             "underside partly visible, and the dark pit shows under and in front of it"),
-    (65, 80, "mostly open, raised about {angle} degrees from the floor: nearly upright but still leaning a little "
-             "over the hole, its underside showing"),
-    (85, 95, "fully open and standing upright on its hinge edge, at about {angle} degrees from the floor, its "
-             "underside facing the camera"),
-    (100, 120, "flung all the way open past upright, to about {angle} degrees: it leans back away from the hole, its "
-               "top resting against whatever is behind it (the wall, a seat or the floor), its underside facing up "
-               "towards the camera, the whole hole uncovered"),
+LID_POSES = [      # the cover is lifted out of its frame (user, 2026-10-09: on this ship it lies beside the opening)
+    (20, 35, "propped up only slightly: one edge still resting in the frame and the opposite edge lifted about "
+             "{angle} degrees from the floor, so only a low wedge-shaped gap of the opening shows between them"),
+    (40, 60, "leaning half open, tilted about {angle} degrees from the floor: one edge resting on the frame's edge and "
+             "the plate slanting over the opening, its grey underside partly visible"),
+    (75, 90, "standing on one edge beside the opening at about {angle} degrees from the floor, leaning against the "
+             "frame, its grey underside facing the camera and the whole opening uncovered"),
+    (0, 0, "laid flat on the floor right next to the opening, alongside one of its edges and not overlapping it, its "
+           "studded top face up and the whole opening uncovered"),
 ]
 
 

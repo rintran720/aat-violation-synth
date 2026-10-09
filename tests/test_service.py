@@ -633,11 +633,11 @@ class CaseTests(unittest.TestCase):
         self.assertIn("{lid_pose}", text)
         filled, choices = violation_cases.fill(text, 3)
         self.assertNotIn("{lid_pose}", filled)
-        self.assertIn(f"about {choices['lid_angle']} degrees", filled)
+        self.assertTrue(f"about {choices['lid_angle']} degrees" in filled or "laid flat on the floor" in filled)
         self.assertEqual(violation_cases.fill(text, 3), (filled, choices))          # same task, same angle
         angles = {violation_cases.fill(text, seed)[1]["lid_angle"] for seed in range(60)}
         self.assertGreater(len(angles), 8)
-        self.assertTrue(min(angles) <= 35 and max(angles) >= 100)                   # from barely open to past upright
+        self.assertTrue(0 in angles and min(a for a in angles if a) <= 35 and max(angles) >= 75)   # flat beside .. upright
         other = violation_cases.change(FLOOR, "open_with_person", "floor-closed")
         self.assertNotEqual({violation_cases.fill(text, s)[1]["lid_angle"] for s in range(5)},
                             {violation_cases.fill(other, s)[1]["lid_angle"] for s in range(5)})
